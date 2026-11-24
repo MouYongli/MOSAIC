@@ -175,6 +175,7 @@ cython_debug/
 .pypirc
 *.h5ad
 *.csv
+!/resources/gene_maps/gene_map_tp10k.csv
 *.png
 data/download/.DS_Store
 
