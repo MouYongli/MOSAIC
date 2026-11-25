@@ -1,0 +1,13 @@
+# Perturbation prediction model fine-tuned on Adamson (GEARS simulation split,
+# seed 1; best validation Pearson delta at epoch 3). Trained on 2026-11-20 with
+# an external script (run_downstream_gpu.py); see docs/reports/downstream_20261120.
+id: deepsc_pp_adamson_1215
+type: finetuned
+base: deepsc_pretrain_1215
+task: pp
+dataset: adamson
+checkpoint: /DATA2/DeepSC/checkpoints/pp_adamson_1215/best_model.pt
+sha256: 3f26038506b11096f4209811f736a7474e1ef4f0242685a9956b0ddd10271568
+
+preprocessing:
+  include_zero_gene: all  # full gene input at inference
