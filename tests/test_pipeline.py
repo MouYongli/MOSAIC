@@ -159,3 +159,41 @@ def test_report_discover_finds_and_selects_prediction_sets(tmp_path):
         discover("cta", "toy", tmp_path, "test", ["m3"])
     with pytest.raises(FileNotFoundError, match="deepsc infer"):
         discover("cta", "toy", tmp_path, "val", None)
+
+
+def test_early_stopping_min_and_max():
+    from deepsc.pipeline.finetune import EarlyStopping
+
+    s = EarlyStopping(patience=2, mode="min")
+    assert [s.update(v, e) for e, v in enumerate([1.0, 0.8, 0.9, 0.85], 1)] == [
+        True,
+        True,
+        False,
+        False,
+    ]
+    assert s.best_epoch == 2 and s.stop
+    s = EarlyStopping(patience=1, mode="max")
+    assert s.update(0.5, 1) and s.update(0.6, 2) and not s.update(0.6, 3) and s.stop
+
+
+def test_plain_state_dict_strips_wrapper_prefix():
+    import torch
+
+    from deepsc.pipeline.finetune import _plain_state_dict
+
+    class Wrapped(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.module = torch.nn.Linear(2, 2)
+
+    assert set(_plain_state_dict(Wrapped())) == {"weight", "bias"}
+    assert set(_plain_state_dict(torch.nn.Linear(2, 2))) == {"weight", "bias"}
+
+
+def test_finetune_rejects_non_pretrained_model():
+    import argparse
+    from deepsc.pipeline.finetune import run
+
+    o = argparse.Namespace(task="cta", dataset="zheng", model="deepsc_cta_zheng_1215")
+    with pytest.raises(ValueError, match="fine-tune a pre-trained model"):
+        run(o)

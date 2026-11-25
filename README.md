@@ -232,6 +232,24 @@ MERGED_DATA_PATH_3CA="/home/xxxx/DeepSC/data/3ac/merged_batch_data"
 LOG_PATH="/home/xxxx/DeepSC/logs"
 ```
 
+## Downstream tasks: fine-tune, infer, report
+
+Cell type annotation (`cta`) and perturbation prediction (`pp`) run through one
+command line tool. It is installed with the package as `deepsc`, and
+`python -m deepsc` works as well:
+
+```bash
+deepsc list                                                                   # registered datasets and models
+deepsc finetune --task cta --dataset zheng --model deepsc_pretrain_1215      # -> outputs/finetune/.../model.yaml
+deepsc infer    --task cta --dataset zheng --model deepsc_cta_zheng_1215     # -> outputs/infer/...
+deepsc report   --task cta --dataset zheng                                   # -> outputs/viz/... (figures, tables, captions)
+```
+
+See [docs/pipeline.md](docs/pipeline.md) for the full guide.
+[configs/datasets/README.md](configs/datasets/README.md) and
+[configs/models/README.md](configs/models/README.md) explain how to add
+datasets and models.
+
 ## Usage
 
 Here’s an example of how to process a dataset:

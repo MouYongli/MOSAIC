@@ -21,8 +21,8 @@ from tqdm import tqdm
 from deepsc.data.dataset import (  # GeneExpressionDatasetMapped,; create_global_celltype_mapping,
     GeneExpressionDatasetMappedWithGlobalCelltype,
 )
-from src.deepsc.data import DataCollator
-from src.deepsc.utils import (
+from deepsc.data import DataCollator
+from deepsc.utils import (
     CosineAnnealingWarmRestartsWithDecayAndLinearWarmup,
     extract_state_dict_with_encoder_prefix,
     report_loading_result,
