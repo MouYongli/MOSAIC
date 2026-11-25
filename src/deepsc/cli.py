@@ -1,6 +1,7 @@
 """``deepsc`` command line: one entry point for the downstream pipeline.
 
     deepsc infer          run a model on a benchmark dataset -> prediction set
+    deepsc report         prediction sets -> figures, tables, captions; model comparison
     deepsc import-legacy  convert results of the 2026-11-20 external runs
     deepsc list           show registered datasets and models
 
@@ -16,6 +17,10 @@ COMMANDS = {
     "infer": (
         "deepsc.pipeline.infer",
         "run a model on a benchmark dataset and write a prediction set",
+    ),
+    "report": (
+        "deepsc.pipeline.report",
+        "prediction sets -> figures, tables and captions, per model and compared",
     ),
     "import-legacy": (
         "deepsc.pipeline.legacy",

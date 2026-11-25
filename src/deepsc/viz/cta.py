@@ -1,26 +1,28 @@
-"""Cell type annotation (CTA) figures from saved DeepSC test predictions.
+"""Cell type annotation (CTA) figures for one prediction set.
 
-Usage:
-    python -m deepsc.viz.cta [--run-dir DIR] [--dataset zheng|PATH.yaml] [--h5ad FILE] [--out DIR]
+Usage (normally via ``deepsc report``):
+    python -m deepsc.viz.cta PRED_DIR [--dataset zheng|PATH.yaml] [--out DIR]
 
 Inputs:
-  * ``<run-dir>/test_predictions.npz``: ``logits``, ``labels``, ``cell_ids``,
-    ``classes`` and ``confusion_matrix`` for every test cell;
-  * ``<run-dir>/status.json``: run record with test metrics and epoch history;
-  * the dataset config ``configs/datasets/cta/<dataset>.yaml``: test h5ad path,
-    label column and the code -> cell type name mapping (``classes``).
+  * a CTA prediction set (``deepsc.pipeline.contract``): ``cell_ids``,
+    ``classes``, ``y_true``, ``logits`` and ``meta.json``;
+  * the dataset config ``configs/datasets/cta/<dataset>.yaml``: h5ad path per
+    split, label column and the code -> cell type name mapping (``classes``);
+  * optionally the model's fine-tuning run record (``training_record`` in the
+    model config) for the training-history figures.
 
-Writes ``<out>/cta/<dataset>/`` (default ``outputs/viz/cta/<dataset>/``; see
+Writes ``<out>/cta/<dataset>/<model>/`` (default ``outputs/viz``; see
 :mod:`deepsc.viz._common` for the layout): one untitled figure per panel, each
 with a ``.json`` sidecar holding its title, short and long caption and a text
 description.
 
-The UMAP is computed from the test cells' expression (TP10K, log1p, 2,000 HVGs,
+The UMAP is computed from the cells' expression (TP10K, log1p, 2,000 HVGs,
 50 PCs); it is a display layout, not a model embedding. Class codes are shown as
 ``Type <code>`` when the dataset config has no ``classes`` mapping.
 """
 
 from __future__ import annotations
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,19 +37,18 @@ from sklearn.metrics import (
 )
 
 import argparse
+from deepsc.pipeline.contract import PredictionSet
 from deepsc.viz._common import (
     DEFAULT_OUT,
-    DOWNSTREAM_RUN_ROOT,
     Checks,
     FigureWriter,
     apply_style,
     load_dataset_config,
-    read_status,
     spread_labels,
+    training_record,
     use_headless_backend,
 )
 
-DEFAULT_RUN_DIR = DOWNSTREAM_RUN_ROOT / "cta_zheng_1215"
 CELLTYPE_COL = "celltype"
 SEED = 0
 UMAP_METHOD = (
@@ -61,63 +62,70 @@ UMAP_METHOD = (
 @dataclass
 class CTAResults:
     classes: np.ndarray  # class codes, index = model output index
-    labels: np.ndarray  # true class index per cell
+    labels: np.ndarray  # true class index per cell (-1 = not a model class)
     logits: np.ndarray
     cell_ids: np.ndarray
-    stored_confusion: np.ndarray
-    status: dict
     adata: ad.AnnData
+    meta: dict
+    training: dict | None = None  # fine-tuning run record (status.json), if known
 
     @property
     def predictions(self) -> np.ndarray:
         return self.logits.argmax(1)
 
+    @property
+    def model_id(self) -> str:
+        return self.meta["model"]["id"]
 
-def load(run_dir: Path, h5ad: Path) -> CTAResults:
-    z = np.load(Path(run_dir) / "test_predictions.npz")
+    @property
+    def recorded_test(self) -> dict | None:
+        """Test metrics recorded by an imported legacy run (same predictions, so must match)."""
+        return (self.meta.get("legacy") or {}).get("recorded_test")
+
+
+def load(pred_dir: Path, dataset: dict) -> CTAResults:
+    ps = PredictionSet.load(pred_dir)
+    if ps.task != "cta":
+        raise ValueError(f"{pred_dir} holds {ps.task!r} predictions, not 'cta'")
+    a = ps.arrays
     return CTAResults(
-        classes=z["classes"],
-        labels=z["labels"],
-        logits=z["logits"],
-        cell_ids=z["cell_ids"],
-        stored_confusion=z["confusion_matrix"],
-        status=read_status(run_dir),
-        adata=ad.read_h5ad(h5ad),
+        classes=a["classes"],
+        labels=a["y_true"],
+        logits=a["logits"],
+        cell_ids=a["cell_ids"],
+        adata=ad.read_h5ad(dataset["data"][ps.meta["split"]]),
+        meta=ps.meta,
+        training=training_record(ps.meta),
     )
 
 
 def verify(r: CTAResults, celltype_col: str = CELLTYPE_COL) -> Checks:
-    """Check alignment with the h5ad and that the recorded metrics are reproduced."""
+    """Check alignment with the h5ad and, for legacy runs, the recorded metrics."""
     c = Checks()
-    pred = r.predictions
-    test = r.status["test"]
-    c.add(
-        f"cells {len(r.cell_ids)} == h5ad {r.adata.n_obs} == recorded {r.status['counts']['test']}",
-        len(r.cell_ids) == r.adata.n_obs == r.status["counts"]["test"],
-    )
-    if len(r.cell_ids) == r.adata.n_obs:
+    n = len(r.cell_ids)
+    c.add(f"cells {n} == h5ad {r.adata.n_obs}", n == r.adata.n_obs)
+    if n == r.adata.n_obs:
         c.add(
             "cell order == h5ad order", (r.cell_ids == r.adata.obs_names.values).all()
         )
+        known = r.labels >= 0
         c.add(
             "labels == h5ad cell types",
-            (r.classes[r.labels] == r.adata.obs[celltype_col].astype(str).values).all(),
+            (
+                r.classes[r.labels[known]]
+                == r.adata.obs[celltype_col].astype(str).values[known]
+            ).all(),
         )
-    c.add("classes == recorded", list(r.classes) == r.status["classes"])
-    c.add(
-        "confusion matrix == stored",
-        (
-            confusion_matrix(r.labels, pred, labels=range(len(r.classes)))
-            == r.stored_confusion
-        ).all(),
-    )
-    c.close("accuracy", accuracy_score(r.labels, pred), test["accuracy"], atol=1e-9)
-    c.close(
-        "macro-F1",
-        f1_score(r.labels, pred, average="macro"),
-        test["macro_f1"],
-        atol=1e-9,
-    )
+    c.add("every cell's label is a model class", (r.labels >= 0).all())
+    if r.recorded_test:
+        pred, test = r.predictions, r.recorded_test
+        c.close("accuracy", accuracy_score(r.labels, pred), test["accuracy"], atol=1e-9)
+        c.close(
+            "macro-F1",
+            f1_score(r.labels, pred, average="macro"),
+            test["macro_f1"],
+            atol=1e-9,
+        )
     return c
 
 
@@ -473,21 +481,15 @@ def class_names_from_config(cfg: dict) -> tuple[dict[str, str], dict[str, str]]:
     return short, full
 
 
-def run(
-    run_dir: Path,
-    out: Path,
-    dataset: dict,
-    h5ad: Path | None = None,
-) -> FigureWriter:
-    """Verify, then write all CTA figures, metadata and tables. Returns the writer.
+def run(pred_dir: Path, out: Path, dataset: dict) -> FigureWriter:
+    """Verify, then write all CTA figures, metadata and tables for one prediction set.
 
-    ``dataset`` is a dataset config (see ``configs/datasets/cta/``); ``h5ad``
-    overrides its ``data.test`` path.
+    ``pred_dir`` is a prediction set (see ``deepsc.pipeline.contract``) and
+    ``dataset`` its dataset config. Output: ``<out>/cta/<dataset>/<model>/``.
     """
-    h5ad = Path(h5ad or dataset["data"]["test"])
     class_names, full_names = class_names_from_config(dataset)
     dataset_label = dataset.get("label", dataset["name"])
-    r = load(run_dir, h5ad)
+    r = load(pred_dir, dataset)
     print("Verification:")
     checks = verify(r, dataset.get("celltype_col", CELLTYPE_COL))
     if class_names:
@@ -504,9 +506,10 @@ def run(
     perm = sorted(
         range(len(r.classes)), key=lambda k: order.index(display[r.classes[k]])
     )
+    stored = confusion_matrix(r.labels, r.predictions, labels=range(len(r.classes)))
     checks.add(
-        "plotted confusion matrix == stored (display order)",
-        (mat == r.stored_confusion[np.ix_(perm, perm)]).all(),
+        "plotted confusion matrix == predictions (display order)",
+        (mat == stored[np.ix_(perm, perm)]).all(),
     )
     checks.require()
 
@@ -518,11 +521,12 @@ def run(
         dataset["name"],
         dataset_label,
         {
-            "predictions": run_dir / "test_predictions.npz",
-            "run_record": run_dir / "status.json",
-            "h5ad": h5ad,
+            "predictions": Path(pred_dir).resolve(),
+            "h5ad": dataset["data"][r.meta["split"]],
             "dataset_config": dataset["_path"],
+            "model_config": r.meta["model"].get("config", ""),
         },
+        model=r.model_id,
     )
     ds, n, k = dataset_label, len(df), len(order)
     acc, mf1 = float((df.ground_truth == df.prediction).mean()), float(
@@ -553,7 +557,12 @@ def run(
         if not class_names
         else (f"Abbreviations: {'; '.join(abbrev)}." if abbrev else "")
     )
-    sel = f"The checkpoint with the lowest validation loss (epoch {r.status['best_epoch']}) was evaluated."
+    sel = (
+        f"Model: {r.model_id}; the checkpoint with the lowest validation loss (epoch "
+        f"{r.training['best_epoch']}) was evaluated."
+        if r.training
+        else f"Model: {r.model_id}."
+    )
     base = {"cells": n, "classes": k, "accuracy": acc, "macro_f1": mf1}
 
     w.save(
@@ -656,14 +665,35 @@ def run(
         },
     )
 
-    h = r.status["history"]
-    best = r.status["best_epoch"]
+    if r.training:
+        _save_history(w, r.training, ds)
+    w.table(df, "cells", index=False)
+    w.table(metrics.round(4), "per_class_metrics")
+    w.finalize(
+        checks,
+        summary={
+            **base,
+            "model": r.model_id,
+            "split": r.meta["split"],
+            "misclassified": n_wrong,
+            "weighted_f1": float(
+                f1_score(df.ground_truth, df.prediction, average="weighted")
+            ),
+            "per_class_f1": metrics.f1.round(4).to_dict(),
+        },
+    )
+    return w
+
+
+def _save_history(w: FigureWriter, training: dict, ds: str) -> None:
+    h = training["history"]
+    best = training["best_epoch"]
     bv = next(x["val"] for x in h if x["epoch"] == best)
     last = h[-1]
     mono = all(b["train_loss"] < a["train_loss"] for a, b in zip(h, h[1:]))
     best_f1 = max(h, key=lambda x: x["val"]["macro_f1"])
     w.save(
-        fig_history(r.status, "loss"),
+        fig_history(training, "loss"),
         "training_loss",
         title=f"CTA fine-tuning loss, {ds}",
         caption_short=f"Training and validation loss during CTA fine-tuning on {ds}.",
@@ -682,7 +712,7 @@ def run(
         metrics={"history": h, "best_epoch": best},
     )
     w.save(
-        fig_history(r.status, "val"),
+        fig_history(training, "val"),
         "training_validation_metrics",
         title=f"CTA validation accuracy and macro-F1, {ds}",
         caption_short=f"Validation accuracy and macro-F1 during CTA fine-tuning on {ds}.",
@@ -700,41 +730,30 @@ def run(
         metrics={"history": h, "best_epoch": best},
     )
 
-    w.table(df, "cells", index=False)
-    w.table(metrics.round(4), "per_class_metrics")
-    w.finalize(
-        checks,
-        summary={**base, "misclassified": n_wrong, "recorded_test": r.status["test"]},
-    )
-    return w
-
 
 def main(argv=None) -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument(
-        "--run-dir",
+        "predictions",
         type=Path,
-        default=DEFAULT_RUN_DIR,
-        help="dir with test_predictions.npz, status.json",
+        help="prediction set dir (predictions.npz + meta.json)",
     )
     p.add_argument(
-        "--dataset",
-        default="zheng",
-        help="dataset config name in configs/datasets/cta/ or a YAML path",
-    )
-    p.add_argument(
-        "--h5ad", type=Path, help="override the test h5ad from the dataset config"
+        "--dataset", help="dataset config name or YAML path (default: from meta.json)"
     )
     p.add_argument(
         "--out",
         type=Path,
         default=DEFAULT_OUT,
-        help="root output dir; figures go to <out>/cta/<dataset>/",
+        help="root dir; writes <out>/cta/<dataset>/<model>/",
     )
     args = p.parse_args(argv)
     use_headless_backend()
-    cfg = load_dataset_config("cta", args.dataset)
-    w = run(args.run_dir, args.out, cfg, args.h5ad)
+    dataset = (
+        args.dataset
+        or json.loads((args.predictions / "meta.json").read_text())["dataset"]
+    )
+    w = run(args.predictions, args.out, load_dataset_config("cta", dataset))
     print(f"Saved {len(w.records)} figures to {w.root.resolve()}")
 
 

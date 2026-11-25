@@ -11,3 +11,6 @@ sha256: 3f26038506b11096f4209811f736a7474e1ef4f0242685a9956b0ddd10271568
 
 preprocessing:
   include_zero_gene: all  # full gene input at inference
+
+# Run record of the fine-tuning (status.json: epoch history, recorded test metrics).
+training_record: /DATA2/DeepSC/results/downstream_20261120/pp_adamson_1215/status.json

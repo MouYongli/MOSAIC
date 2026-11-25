@@ -104,7 +104,7 @@ def load_model_config(model: str | Path, _seen: tuple = ()) -> dict:
         raise ValueError(
             f"{path}: type must be one of {MODEL_TYPES}, got {cfg.get('type')!r}"
         )
-    for key in ("checkpoint", "gene_map"):
+    for key in ("checkpoint", "gene_map", "training_record"):
         if cfg.get(key):
             cfg[key] = str(resolve_path(cfg[key]))
     cfg["_path"] = str(path)
