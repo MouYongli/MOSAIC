@@ -588,7 +588,7 @@ def fig_history(status: dict, which: str):
             "o-",
             label=f"Pearson Δ (top-{N_DE} DE)",
         )
-        ax.set_ylabel("Validation Pearson r (as logged)")
+        ax.set_ylabel("Validation Pearson r")
     ax.axvline(
         best, ls=":", c="#555", lw=1, label=f"Selected checkpoint (epoch {best})"
     )
@@ -876,6 +876,12 @@ def run(pred_dir: Path, out: Path, dataset: dict) -> FigureWriter:
 def _save_history(w: FigureWriter, training: dict, ds: str) -> None:
     h, best = training["history"], training["best_epoch"]
     bv = next(x["val"] for x in h if x["epoch"] == best)
+    mapped = training.get("metric_convention") == "mapped_genes"
+    genes_txt = (
+        "over the genes the model represents"
+        if mapped
+        else "as logged by the run (unmapped genes included)"
+    )
     w.save(
         fig_history(training, "loss"),
         "training_loss",
@@ -895,11 +901,15 @@ def _save_history(w: FigureWriter, training: dict, ds: str) -> None:
         title=f"PP validation Δ correlation during fine-tuning ({ds})",
         caption_short=f"Validation Pearson Δ during PP fine-tuning on {ds}.",
         caption_long=f"Pearson Δ over all genes and over the top-{N_DE} DE genes on the validation perturbations "
-        f"after each epoch, as logged by the run (unmapped genes included, see main text). Dotted "
-        f"line: selected checkpoint (epoch {best}).",
+        f"after each epoch, {genes_txt}. Dotted line: selected checkpoint (epoch {best}).",
         description=f"The selected epoch has validation Pearson Δ {bv['pearson_delta']:.3f} (DE "
-        f"{bv['pearson_de_delta']:.3f}). The logged values include unmapped genes and are therefore "
-        f"higher than the mapped-gene test values reported in the other figures.",
+        f"{bv['pearson_de_delta']:.3f})."
+        + (
+            ""
+            if mapped
+            else " The logged values include unmapped genes and are therefore higher than the mapped-gene "
+            "test values reported in the other figures."
+        ),
         metrics={"history": h, "best_epoch": best},
     )
 

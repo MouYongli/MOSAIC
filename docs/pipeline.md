@@ -6,7 +6,7 @@ swapped or re-run on its own.
 
 | Stage | Command | Status |
 |---|---|---|
-| Fine-tune a model on a benchmark | `deepsc finetune` | planned (step 3; use `src/deepsc/finetune/*` for now) |
+| Fine-tune a pre-trained model on a benchmark | `deepsc finetune` | available |
 | Run a model on a benchmark → prediction set | `deepsc infer` | available |
 | Prediction sets → figures, tables, captions | `deepsc report` | available |
 
@@ -20,6 +20,38 @@ Every command is also available as `python -m deepsc <command>`.
 - `configs/models/<id>.yaml`: architecture, checkpoint (with SHA-256, verified
   before use) and task head. `base: <id>` inherits another model config, so a
   fine-tuned model only lists what differs from its pre-trained base.
+
+How to write them and how to add new ones:
+[configs/datasets/README.md](../configs/datasets/README.md),
+[configs/models/README.md](../configs/models/README.md).
+
+## Fine-tuning
+
+```bash
+deepsc finetune --task cta --dataset zheng   --model deepsc_pretrain_1215
+deepsc finetune --task pp  --dataset adamson --model deepsc_pretrain_1215
+```
+
+Output: `outputs/finetune/<task>/<dataset>/<run_id>/`:
+
+- `best_model.pt`: checkpoint of the best validation epoch;
+- `status.json`: run record (options, per-epoch history, best epoch), used by
+  `report` for the training-history figures;
+- `model.yaml`: model config of the result, ready for
+  `deepsc infer --model outputs/finetune/.../model.yaml`;
+- `train.log`: one JSON event per line.
+
+| | CTA | PP |
+|---|---|---|
+| Training code | `CellTypeAnnotation` (data, model loading, optimizer, step) | training step of `finetune_perturbation.py` |
+| Defaults | batch 16, 1,024 genes/cell, Adam 1e-4 constant, cross-entropy | batch 8, 1,536 genes/cell, Adam 1e-4 × 0.9/epoch, masked MSE |
+| Preprocessing | TP10K + log1p (same as `infer`) | GEARS processed data |
+| Best epoch | lowest validation cross-entropy | highest validation Pearson Δ (mapped genes) |
+
+Both: up to 10 epochs, early stopping after 3 epochs without improvement, bf16,
+seed 42. Options: `--epochs`, `--patience`, `--lr`, `--batch-size`,
+`--max-length`, `--cls-loss standard|per_bin`, `--seed`, `--run-id`,
+`--limit-steps N` (smoke tests). Select the GPU with `CUDA_VISIBLE_DEVICES`.
 
 ## Inference
 

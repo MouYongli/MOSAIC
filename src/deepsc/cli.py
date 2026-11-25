@@ -1,5 +1,6 @@
 """``deepsc`` command line: one entry point for the downstream pipeline.
 
+    deepsc finetune       fine-tune a pre-trained model -> checkpoint + model config
     deepsc infer          run a model on a benchmark dataset -> prediction set
     deepsc report         prediction sets -> figures, tables, captions; model comparison
     deepsc import-legacy  convert results of the 2026-11-20 external runs
@@ -14,6 +15,10 @@ from __future__ import annotations
 import argparse
 
 COMMANDS = {
+    "finetune": (
+        "deepsc.pipeline.finetune",
+        "fine-tune a pre-trained model on a benchmark dataset",
+    ),
     "infer": (
         "deepsc.pipeline.infer",
         "run a model on a benchmark dataset and write a prediction set",
