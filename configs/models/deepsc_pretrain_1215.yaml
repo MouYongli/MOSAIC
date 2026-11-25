@@ -1,0 +1,33 @@
+# DeepSC pre-trained checkpoint used for the 2026-11-20 downstream runs.
+# 256-dim embeddings, 10 layers, 35,210 genes, 5 expression bins; saved epoch 11.
+id: deepsc_pretrain_1215
+type: pretrained
+family: deepsc
+checkpoint: /DATA2/DeepSC/checkpoints/pretraining_1215/latest_checkpoint.ckpt
+sha256: 51122b16038ceaeb74531e7fbd86034e5a8ae2105e2710d00c31bc37e69bcacd
+gene_map: resources/gene_maps/gene_map_tp10k.csv  # feature_name -> id (0-based; model ids are id + 1)
+
+architecture:
+  embedding_dim: 256
+  num_genes: 35210
+  num_layers: 10
+  num_heads: 8
+  num_bins: 5
+  alpha: 0.5
+  attn_dropout: 0.1
+  ffn_dropout: 0.1
+  num_layers_ffn: 2
+  use_moe_regressor: true
+  gene_embedding_participate_til_layer: 3
+  attention_stream: 2
+  cross_attention_architecture: "A"
+  moe:
+    n_moe_layers: 4
+    use_moe_ffn: false
+    dim: 256
+    moe_inter_dim: 512
+    n_routed_experts: 2
+    n_activated_experts: 2
+    n_shared_experts: 1
+    score_func: softmax
+    route_scale: 1.0

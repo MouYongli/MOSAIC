@@ -66,6 +66,9 @@ dependencies = [
     "pytest>=7.0.0",
 ]
 
+[project.scripts]
+deepsc = "deepsc.cli:main"
+
 [[tool.uv.index]]
 name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"

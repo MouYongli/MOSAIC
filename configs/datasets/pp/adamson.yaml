@@ -12,3 +12,7 @@ data:
   split: /DATA2/DeepSC/adamson/splits/adamson_simulation_1_0.75.pkl
   split_name: simulation
   split_seed: 1
+  train_gene_set_size: 0.75
+  # GEARS loads <gears_root>/<gears_name>/
+  gears_root: /DATA2/DeepSC
+  gears_name: adamson
