@@ -1,0 +1,14 @@
+# Adamson et al. (2016) CRISPRi Perturb-seq in K562 cells, GEARS-processed.
+# Single-gene perturbations; GEARS "simulation" split with seed 1 and
+# train fraction 0.75: 54 training, 6 validation and 21 test perturbations,
+# all test perturbations unseen during training.
+
+name: adamson
+label: Adamson
+task: pp
+
+data:
+  h5ad: /DATA2/DeepSC/adamson/perturb_processed.h5ad
+  split: /DATA2/DeepSC/adamson/splits/adamson_simulation_1_0.75.pkl
+  split_name: simulation
+  split_seed: 1
