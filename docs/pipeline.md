@@ -8,7 +8,7 @@ swapped or re-run on its own.
 |---|---|---|
 | Fine-tune a model on a benchmark | `deepsc finetune` | planned (step 3; use `src/deepsc/finetune/*` for now) |
 | Run a model on a benchmark → prediction set | `deepsc infer` | available |
-| Prediction sets → figures, tables, captions | `deepsc report` | planned (step 2; use `python -m deepsc.viz.*` for now) |
+| Prediction sets → figures, tables, captions | `deepsc report` | available |
 
 Every command is also available as `python -m deepsc <command>`.
 `deepsc list` shows the registered datasets and models.
@@ -34,6 +34,29 @@ Options: `--split`, `--device`, `--precision bf16|fp32`, `--batch-size`,
 
 Pre-trained models without a task head are rejected for now (zero-shot, few-shot
 and instruction-tuned models are planned).
+
+## Report
+
+```bash
+deepsc report --task cta --dataset zheng                     # every model with predictions
+deepsc report --task pp  --dataset adamson --models A B      # selected models
+```
+
+Reads `outputs/infer/<task>/<dataset>/<model>/<split>/` and writes
+`outputs/viz/<task>/<dataset>/`:
+
+- `<model>/`: one untitled figure per panel (PDF + 300 dpi PNG) with a JSON
+  sidecar (`title`, `caption_short`, `caption_long`, `description`, `metrics`),
+  tables, `manifest.json` and a `README.md` index. Training-history figures are
+  added when the model config has a `training_record`.
+- `comparison/`: all models side by side (metrics table and figures; PP also
+  shows the train-mean-Δ and control-mean baselines).
+
+Each prediction set is checked against the dataset (cell order and labels for
+CTA; genes, cells per condition and targets for PP) before plotting; imported
+legacy runs must also reproduce their recorded metrics. A failed check stops
+the report. A single set can be plotted with `python -m deepsc.viz.cta DIR` or
+`python -m deepsc.viz.perturbation DIR`.
 
 ## Prediction set format
 

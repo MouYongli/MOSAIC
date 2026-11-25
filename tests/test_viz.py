@@ -41,25 +41,18 @@ def _cta_results(corrupt_order=False):
         {"celltype": classes[labels]}, index=ids[::-1] if corrupt_order else ids
     )
     adata = ad.AnnData(X=np.zeros((40, 3), dtype=np.float32), obs=obs)
-    from sklearn.metrics import confusion_matrix, f1_score
+    from sklearn.metrics import f1_score
 
-    status = {
-        "counts": {"test": 40},
-        "classes": list(classes),
-        "test": {
-            "accuracy": float((pred == labels).mean()),
-            "macro_f1": float(f1_score(labels, pred, average="macro")),
-        },
+    recorded = {
+        "accuracy": float((pred == labels).mean()),
+        "macro_f1": float(f1_score(labels, pred, average="macro")),
     }
-    return cta.CTAResults(
-        classes,
-        labels,
-        logits,
-        ids,
-        confusion_matrix(labels, pred, labels=range(4)),
-        status,
-        adata,
-    )
+    meta = {
+        "model": {"id": "m"},
+        "split": "test",
+        "legacy": {"recorded_test": recorded},
+    }
+    return cta.CTAResults(classes, labels, logits, ids, adata, meta)
 
 
 def test_cta_verify_passes_on_consistent_data():
@@ -69,6 +62,15 @@ def test_cta_verify_passes_on_consistent_data():
 def test_cta_verify_detects_misaligned_cells():
     with pytest.raises(VerificationError, match="cell order"):
         cta.verify(_cta_results(corrupt_order=True)).require()
+
+
+def test_cta_verify_checks_recorded_metrics_only_for_legacy_sets():
+    r = _cta_results()
+    r.meta["legacy"]["recorded_test"]["accuracy"] += 0.01
+    with pytest.raises(VerificationError, match="accuracy"):
+        cta.verify(r).require()
+    r.meta.pop("legacy")
+    cta.verify(r).require()
 
 
 def test_cta_class_order_is_numeric_and_metrics_match_confusion():
@@ -112,13 +114,9 @@ def _pp_results(perfect=True):
         else target + rng.normal(0, 0.3, target.shape).astype(np.float32)
     )
     pred[:, ~mapped] = 0
-    status = {
-        "counts": {"test": len(test)},
-        "mapped_genes": int(mapped.sum()),
-        "test": {},
-    }
+    meta = {"model": {"id": "m"}, "split": "test", "legacy": {"recorded_test": {}}}
     r = pp.PPResults(
-        pred, target, np.array(conds)[test], genes, mapped, status, adata, ["T+ctrl"]
+        pred, target, np.array(conds)[test], genes, mapped, adata, ["T+ctrl"], meta
     )
     return r, X
 
@@ -140,9 +138,9 @@ def test_pp_means_and_metrics_on_perfect_predictions():
 def test_pp_verify_reproduces_recorded_metrics_and_flags_mismatch():
     r, _ = _pp_results(perfect=False)
     m = pp.compute_means(r)
-    r.status["test"] = pp.recorded_convention_metrics(r, m)
+    r.meta["legacy"]["recorded_test"] = pp.recorded_convention_metrics(r, m)
     pp.verify(r, m).require()
-    r.status["test"]["pearson_delta"] += 0.01
+    r.meta["legacy"]["recorded_test"]["pearson_delta"] += 0.01
     with pytest.raises(VerificationError, match="pearson_delta"):
         pp.verify(r, m).require()
 

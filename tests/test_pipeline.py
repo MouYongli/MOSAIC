@@ -139,3 +139,23 @@ def test_infer_refuses_pretrained_model_without_head():
         _check_model_for_task(
             registry.load_model_config("deepsc_pp_adamson_1215"), "cta"
         )
+
+
+def test_report_discover_finds_and_selects_prediction_sets(tmp_path):
+    from deepsc.pipeline.report import discover
+
+    for m in ("m1", "m2"):
+        ps = _cta()
+        ps.meta["model"] = {"id": m}
+        ps.save(tmp_path / "cta" / "toy" / m / "test")
+    assert [p.parent.name for p in discover("cta", "toy", tmp_path, "test", None)] == [
+        "m1",
+        "m2",
+    ]
+    assert [
+        p.parent.name for p in discover("cta", "toy", tmp_path, "test", ["m2"])
+    ] == ["m2"]
+    with pytest.raises(FileNotFoundError, match="m3"):
+        discover("cta", "toy", tmp_path, "test", ["m3"])
+    with pytest.raises(FileNotFoundError, match="deepsc infer"):
+        discover("cta", "toy", tmp_path, "val", None)

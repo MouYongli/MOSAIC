@@ -1,26 +1,26 @@
-"""Perturbation prediction (PP) figures from saved DeepSC test predictions.
+"""Perturbation prediction (PP) figures for one prediction set.
 
-Usage:
-    python -m deepsc.viz.perturbation [--run-dir DIR] [--dataset adamson|PATH.yaml]
-                                      [--h5ad FILE] [--split PKL] [--out DIR]
+Usage (normally via ``deepsc report``):
+    python -m deepsc.viz.perturbation PRED_DIR [--dataset adamson|PATH.yaml] [--out DIR]
 
 Inputs:
-  * ``<run-dir>/test_predictions.npz``: per test cell ``predictions`` and ``targets``
-    (cells x genes), ``conditions``, ``genes`` and ``gene_vocab_ids`` (0 = unmapped);
-  * ``<run-dir>/status.json``: run record with test metrics and epoch history;
-  * the GEARS ``perturb_processed.h5ad`` (control cells, ``uns[rank_genes_groups_cov_all]``);
-  * the GEARS split pickle (training perturbations, for the train-mean baseline).
+  * a PP prediction set (``deepsc.pipeline.contract``): per test cell
+    ``predictions`` and ``targets`` (cells x genes), ``conditions``, ``genes``,
+    ``gene_mask`` and ``meta.json``;
+  * the dataset config ``configs/datasets/pp/<dataset>.yaml``: the GEARS
+    ``perturb_processed.h5ad`` (control cells, ``uns[rank_genes_groups_cov_all]``)
+    and the split pickle (training perturbations, for the train-mean baseline);
+  * optionally the model's fine-tuning run record (training-history figures).
 
-Data paths come from ``configs/datasets/pp/<dataset>.yaml``.
+Writes ``<out>/pp/<dataset>/<model>/`` (default ``outputs/viz``; see
+:mod:`deepsc.viz._common` for the layout): one untitled figure per panel, each
+with a ``.json`` sidecar holding its title, short and long caption and a text
+description.
 
-Writes ``<out>/pp/<dataset>/`` (default ``outputs/viz/pp/<dataset>/``; see :mod:`deepsc.viz._common` for the layout):
-one untitled figure per panel, each with a ``.json`` sidecar holding its title,
-short and long caption and a text description.
-
-Genes without a DeepSC vocabulary entry have predictions AND targets set to 0 in the
-saved arrays. With the original metric their delta is -control on both sides, which
-inflates delta correlations. Verification reproduces the recorded metrics with that
-convention; every figure and the "mapped" metrics use mapped genes only.
+All metrics and figures use the genes in ``gene_mask`` only. Imported legacy
+runs (2026-11-20) zeroed unmapped genes in predictions AND targets and scored
+all genes, which inflates delta correlations; for those, verification
+reproduces the recorded metrics with that convention.
 
 Baseline "train-mean Δ": predict the average Δ of all training perturbations for
 every test perturbation (no learning involved).
@@ -38,18 +38,17 @@ import pandas as pd
 from scipy.stats import pearsonr
 
 import argparse
+from deepsc.pipeline.contract import PredictionSet
 from deepsc.viz._common import (
     DEFAULT_OUT,
-    DOWNSTREAM_RUN_ROOT,
     Checks,
     FigureWriter,
     apply_style,
     load_dataset_config,
-    read_status,
+    training_record,
     use_headless_backend,
 )
 
-DEFAULT_RUN_DIR = DOWNSTREAM_RUN_ROOT / "pp_adamson_1215"
 CTRL = "ctrl"
 N_DE = 20
 SEED = 0
@@ -64,14 +63,24 @@ class PPResults:
     target: np.ndarray  # cells x genes
     cond: np.ndarray  # condition per test cell
     genes: np.ndarray
-    mapped: np.ndarray  # bool per gene: has a DeepSC vocabulary id
-    status: dict
+    mapped: np.ndarray  # bool per gene: the model can represent it (gene_mask)
     adata: ad.AnnData
     train_conditions: list[str]
+    meta: dict
+    training: dict | None = None  # fine-tuning run record (status.json), if known
 
     @property
     def conditions(self) -> np.ndarray:
         return np.unique(self.cond)
+
+    @property
+    def model_id(self) -> str:
+        return self.meta["model"]["id"]
+
+    @property
+    def recorded_test(self) -> dict | None:
+        """Test metrics recorded by an imported legacy run (same predictions, so must match)."""
+        return (self.meta.get("legacy") or {}).get("recorded_test")
 
 
 @dataclass
@@ -86,23 +95,23 @@ class Means:
     de: dict[str, np.ndarray]  # top-N DE gene indices per test condition
 
 
-def load(
-    run_dir: Path,
-    h5ad: Path,
-    split: Path,
-) -> PPResults:
-    z = np.load(Path(run_dir) / "test_predictions.npz")
-    with open(split, "rb") as f:
+def load(pred_dir: Path, dataset: dict) -> PPResults:
+    ps = PredictionSet.load(pred_dir)
+    if ps.task != "pp":
+        raise ValueError(f"{pred_dir} holds {ps.task!r} predictions, not 'pp'")
+    with open(dataset["data"]["split"], "rb") as f:
         train = [c for c in pickle.load(f)["train"] if c != CTRL]
+    a = ps.arrays
     return PPResults(
-        pred=z["predictions"],
-        target=z["targets"],
-        cond=z["conditions"],
-        genes=z["genes"],
-        mapped=z["gene_vocab_ids"] > 0,
-        status=read_status(run_dir),
-        adata=ad.read_h5ad(h5ad),
+        pred=a["predictions"],
+        target=a["targets"],
+        cond=a["conditions"],
+        genes=a["genes"],
+        mapped=a["gene_mask"],
+        adata=ad.read_h5ad(dataset["data"]["h5ad"]),
         train_conditions=train,
+        meta=ps.meta,
+        training=training_record(ps.meta),
     )
 
 
@@ -209,18 +218,6 @@ def verify(r: PPResults, m: Means) -> Checks:
     mk = r.mapped
     c.add("gene order == h5ad", (r.genes == r.adata.var["gene_name"].to_numpy()).all())
     c.add(
-        f"cells {len(r.cond)} == recorded {r.status['counts']['test']}",
-        len(r.cond) == r.status["counts"]["test"],
-    )
-    c.add(
-        f"mapped genes {mk.sum()} == recorded {r.status['mapped_genes']}",
-        mk.sum() == r.status["mapped_genes"],
-    )
-    c.add(
-        "unmapped genes: predictions and targets all 0",
-        not r.pred[:, ~mk].any() and not r.target[:, ~mk].any(),
-    )
-    c.add(
         "cells per condition == h5ad",
         all((r.cond == k).sum() == (oc == k).sum() for k in r.conditions),
     )
@@ -230,8 +227,14 @@ def verify(r: PPResults, m: Means) -> Checks:
             np.allclose(m.target[k][mk], m.h5ad[k][mk], atol=1e-5) for k in r.conditions
         ),
     )
-    for k, v in recorded_convention_metrics(r, m).items():
-        c.close(k, v, r.status["test"][k], atol=1e-5)
+    if r.recorded_test:
+        # Legacy runs zeroed unmapped genes in predictions and targets and scored all genes.
+        c.add(
+            "legacy: unmapped genes zeroed in predictions and targets",
+            not r.pred[:, ~mk].any() and not r.target[:, ~mk].any(),
+        )
+        for k, v in recorded_convention_metrics(r, m).items():
+            c.close(k, v, r.recorded_test[k], atol=1e-5)
     return c
 
 
@@ -618,22 +621,14 @@ def target_knockdown(r: PPResults, m: Means) -> pd.DataFrame:
     )
 
 
-def run(
-    run_dir: Path,
-    out: Path,
-    dataset: dict,
-    h5ad: Path | None = None,
-    split: Path | None = None,
-) -> FigureWriter:
-    """Verify, then write all PP figures, metadata and tables. Returns the writer.
+def run(pred_dir: Path, out: Path, dataset: dict) -> FigureWriter:
+    """Verify, then write all PP figures, metadata and tables for one prediction set.
 
-    ``dataset`` is a dataset config (see ``configs/datasets/pp/``); ``h5ad`` and
-    ``split`` override its ``data.h5ad`` and ``data.split`` paths.
+    ``pred_dir`` is a prediction set (see ``deepsc.pipeline.contract``) and
+    ``dataset`` its dataset config. Output: ``<out>/pp/<dataset>/<model>/``.
     """
-    h5ad = Path(h5ad or dataset["data"]["h5ad"])
-    split = Path(split or dataset["data"]["split"])
     dataset_label = dataset.get("label", dataset["name"])
-    r = load(run_dir, h5ad, split)
+    r = load(pred_dir, dataset)
     m = compute_means(r)
     print("Verification:")
     checks = verify(r, m)
@@ -656,17 +651,18 @@ def run(
         dataset["name"],
         ds,
         {
-            "predictions": run_dir / "test_predictions.npz",
-            "run_record": run_dir / "status.json",
-            "h5ad": h5ad,
-            "split": split,
+            "predictions": Path(pred_dir).resolve(),
+            "h5ad": dataset["data"]["h5ad"],
+            "split": dataset["data"]["split"],
             "dataset_config": dataset["_path"],
+            "model_config": r.meta["model"].get("config", ""),
         },
+        model=r.model_id,
     )
     note = METRIC_NOTE.format(n_mapped=n_mapped)
     setting = (
         f"{ds} test set: {n_cond} perturbations not seen during training ({n_cells:,} cells), "
-        f"{len(r.train_conditions)} training perturbations"
+        f"{len(r.train_conditions)} training perturbations; model {r.model_id}"
     )
     model_r, base_r = (
         pc.pearson_delta_mapped.mean(),
@@ -681,13 +677,17 @@ def run(
         (pc.pearson_de_delta_mapped > pc.pearson_de_delta_trainmean_baseline).sum()
     )
     negative = list(pc.gene[pc.pearson_delta_mapped < 0])
-    rec = r.status["test"]
+    rec = r.recorded_test
     summary = {
+        "model": r.model_id,
+        "split": r.meta["split"],
         "conditions": n_cond,
         "cells": n_cells,
         "mapped_genes": n_mapped,
-        "pearson_delta_recorded": rec["pearson_delta"],
-        "pearson_de_delta_recorded": rec["pearson_de_delta"],
+        "pearson_delta_recorded": rec["pearson_delta"] if rec else None,
+        "pearson_de_delta_recorded": rec["pearson_de_delta"] if rec else None,
+        "mse_mapped": float(pc.mse_model.mean()),
+        "mse_control_mean_baseline": float(pc.mse_control_mean.mean()),
         "pearson_delta_mapped": model_r,
         "pearson_de_delta_mapped": model_de,
         "pearson_delta_trainmean_baseline": base_r,
@@ -798,9 +798,13 @@ def run(
             if negative
             else ""
         )
-        + f"The run's recorded Pearson Δ ({rec['pearson_delta']:.3f}) is higher because it also "
-        f"counts {int((~mk).sum())} unmapped genes whose predictions and targets were both set to 0, "
-        f"which agree trivially.",
+        + (
+            f"The run's recorded Pearson Δ ({rec['pearson_delta']:.3f}) is higher because it also "
+            f"counts {int((~mk).sum())} unmapped genes whose predictions and targets were both set to 0, "
+            f"which agree trivially."
+            if rec
+            else ""
+        ),
         metrics=summary,
     )
     worse = list(pc.gene[pc.mse_model >= pc.mse_control_mean])
@@ -860,11 +864,20 @@ def run(
         },
     )
 
-    # Training -------------------------------------------------------------------
-    h, best = r.status["history"], r.status["best_epoch"]
+    if r.training:
+        _save_history(w, r.training, ds)
+    w.table(pc.round(5), "per_condition_metrics")
+    if len(kd):
+        w.table(kd.round(5), "target_knockdown")
+    w.finalize(checks, summary=summary)
+    return w
+
+
+def _save_history(w: FigureWriter, training: dict, ds: str) -> None:
+    h, best = training["history"], training["best_epoch"]
     bv = next(x["val"] for x in h if x["epoch"] == best)
     w.save(
-        fig_history(r.status, "loss"),
+        fig_history(training, "loss"),
         "training_loss",
         title=f"PP fine-tuning loss ({ds})",
         caption_short=f"Training and validation MSE during PP fine-tuning on {ds}.",
@@ -877,7 +890,7 @@ def run(
         metrics={"history": h, "best_epoch": best},
     )
     w.save(
-        fig_history(r.status, "val"),
+        fig_history(training, "val"),
         "training_validation_delta",
         title=f"PP validation Δ correlation during fine-tuning ({ds})",
         caption_short=f"Validation Pearson Δ during PP fine-tuning on {ds}.",
@@ -890,51 +903,34 @@ def run(
         metrics={"history": h, "best_epoch": best},
     )
 
-    w.table(pc.round(5), "per_condition_metrics")
-    if len(kd):
-        w.table(kd.round(5), "target_knockdown")
-    w.finalize(checks, summary=summary)
-    return w
-
 
 def main(argv=None) -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument(
-        "--run-dir",
+        "predictions",
         type=Path,
-        default=DEFAULT_RUN_DIR,
-        help="dir with test_predictions.npz, status.json",
+        help="prediction set dir (predictions.npz + meta.json)",
     )
     p.add_argument(
-        "--dataset",
-        default="adamson",
-        help="dataset config name in configs/datasets/pp/ or a YAML path",
-    )
-    p.add_argument(
-        "--h5ad", type=Path, help="override the h5ad from the dataset config"
-    )
-    p.add_argument(
-        "--split", type=Path, help="override the split pickle from the dataset config"
+        "--dataset", help="dataset config name or YAML path (default: from meta.json)"
     )
     p.add_argument(
         "--out",
         type=Path,
         default=DEFAULT_OUT,
-        help="root output dir; figures go to <out>/pp/<dataset>/",
+        help="root dir; writes <out>/pp/<dataset>/<model>/",
     )
     args = p.parse_args(argv)
     use_headless_backend()
-    cfg = load_dataset_config("pp", args.dataset)
-    w = run(args.run_dir, args.out, cfg, args.h5ad, args.split)
-    s = json.loads((w.root / "manifest.json").read_text())["summary"]
-    print(f"\n{'metric':<24}{'recorded':>10}{'mapped':>10}{'baseline':>10}")
-    print(
-        f"{'Pearson Δ':<24}{s['pearson_delta_recorded']:>10.4f}{s['pearson_delta_mapped']:>10.4f}"
-        f"{s['pearson_delta_trainmean_baseline']:>10.4f}"
+    dataset = (
+        args.dataset
+        or json.loads((args.predictions / "meta.json").read_text())["dataset"]
     )
+    w = run(args.predictions, args.out, load_dataset_config("pp", dataset))
+    s = json.loads((w.root / "manifest.json").read_text())["summary"]
     print(
-        f"{'Pearson Δ (top-20 DE)':<24}{s['pearson_de_delta_recorded']:>10.4f}{s['pearson_de_delta_mapped']:>10.4f}"
-        f"{s['pearson_de_delta_trainmean_baseline']:>10.4f}"
+        f"Pearson Δ (mapped) {s['pearson_delta_mapped']:.4f} | DE {s['pearson_de_delta_mapped']:.4f} | "
+        f"train-mean-Δ baseline {s['pearson_delta_trainmean_baseline']:.4f} | MSE {s['mse_mapped']:.4f}"
     )
     print(f"Saved {len(w.records)} figures to {w.root.resolve()}")
 
