@@ -74,6 +74,14 @@ def spread_labels(y: np.ndarray, gap: float) -> np.ndarray:
     return y
 
 
+def boxed_legend(ax, **kw):
+    """Legend on an opaque white box, so grid lines and data do not run through its text."""
+    kw.setdefault("fontsize", 8)
+    leg = ax.legend(frameon=True, **kw)
+    leg.get_frame().set(facecolor="white", edgecolor="none", alpha=0.9)
+    return leg
+
+
 def slug(text: str) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in text.lower()).strip("_")
 
@@ -293,7 +301,12 @@ def training_record(meta: dict) -> dict | None:
     elif (meta.get("model") or {}).get("config"):
         from deepsc.pipeline.registry import load_model_config
 
-        path = load_model_config(meta["model"]["config"]).get("training_record")
+        # The prediction set records an absolute config path, which goes stale when
+        # the checkout it was written from moves; fall back to the registry by id.
+        ref = meta["model"]["config"]
+        if not Path(ref).exists() and meta["model"].get("id"):
+            ref = meta["model"]["id"]
+        path = load_model_config(ref).get("training_record")
     if path and Path(path).exists():
         return (
             read_status(Path(path).parent) if Path(path).name == "status.json" else None
