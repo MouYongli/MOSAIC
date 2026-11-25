@@ -5,6 +5,7 @@ Migrated from scGPT examples, all dependencies are self-contained.
 
 import json
 import logging
+import os
 import warnings
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -57,9 +58,9 @@ load_param_prefixs = [
 
 # settings for optimizer
 lr = 1e-4  # or 1e-4
-batch_size = 64
-eval_batch_size = 64
-epochs = 10
+batch_size = int(os.environ.get("DEEPSC_BATCH_SIZE", "64"))
+eval_batch_size = int(os.environ.get("DEEPSC_EVAL_BATCH_SIZE", "64"))
+epochs = int(os.environ.get("DEEPSC_EPOCHS", "10"))
 schedule_interval = 1
 early_stop = 10
 
@@ -76,9 +77,13 @@ use_fast_transformer = True  # whether to use fast transformer
 log_interval = 100
 
 # DeepSC pretrained model and vocabulary
-load_model = "/home/angli/DeepSC/results/pretraining_1201/latest_checkpoint.ckpt"
-vocab_csv_path = (
-    "/home/angli/baseline/DeepSC-117-t86/scripts/data/preprocessing/gene_map_tp10k.csv"
+load_model = os.environ.get(
+    "DEEPSC_CHECKPOINT",
+    "/DATA2/DeepSC/checkpoints/pretraining_1215/latest_checkpoint.ckpt",
+)
+vocab_csv_path = os.environ.get(
+    "DEEPSC_GENE_MAP",
+    str(Path(__file__).resolve().parents[3] / "resources/gene_maps/gene_map_tp10k.csv"),
 )
 
 # DeepSC model architecture (must match pretrained model)
@@ -114,7 +119,7 @@ enable_ce = False
 
 
 # dataset and evaluation choices
-data_name = "norman"
+data_name = os.environ.get("DEEPSC_DATASET", "adamson")
 split = "simulation"
 if data_name == "norman":
     perts_to_plot = ["SAMD1+ZBTB1"]
@@ -123,7 +128,9 @@ elif data_name == "adamson":
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-save_dir = Path(f"./save/dev_perturb_{data_name}-{time.strftime('%b%d-%H-%M')}/")
+save_dir = Path(os.environ.get(
+    "DEEPSC_OUTPUT_DIR", f"./save/dev_perturb_{data_name}-{time.strftime('%b%d-%H-%M')}/"
+))
 save_dir.mkdir(parents=True, exist_ok=True)
 print(f"saving to {save_dir}")
 
@@ -131,15 +138,15 @@ add_file_handler(logger, save_dir / "run.log")
 logger.info(f"Running on {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
 
-pert_data = PertData("/home/angli/DeepSC/src/deepsc/finetune/archive/data")
+pert_data = PertData(os.environ.get(
+    "DEEPSC_DATA_ROOT", str(Path(__file__).resolve().parents[3] / "data")
+))
 pert_data.load(data_name=data_name)
 pert_data.prepare_split(split=split, seed=1)
 pert_data.get_dataloader(batch_size=batch_size, test_batch_size=eval_batch_size)
 # DeepSC gene mapping preparation
 # Load DeepSC gene mapping from CSV (id=0 is padding in DeepSC, so CSV ids need +1)
-deepsc_gene_map_file = Path(
-    "/home/angli/baseline/DeepSC-117-t86/scripts/data/preprocessing/gene_map_tp10k.csv"
-)
+deepsc_gene_map_file = Path(vocab_csv_path)
 if deepsc_gene_map_file.exists():
     logger.info(f"Loading DeepSC gene mapping from {deepsc_gene_map_file}")
     deepsc_gene_df = pd.read_csv(deepsc_gene_map_file)
