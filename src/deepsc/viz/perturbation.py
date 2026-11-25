@@ -44,6 +44,7 @@ from deepsc.viz._common import (
     Checks,
     FigureWriter,
     apply_style,
+    boxed_legend,
     load_dataset_config,
     training_record,
     use_headless_backend,
@@ -332,7 +333,7 @@ def fig_absolute(r: PPResults, ex: Example):
         ha="right",
         va="bottom",
     )
-    ax.legend(frameon=False, loc="upper left", fontsize=8)
+    boxed_legend(ax, loc="upper left")
     return fig
 
 
@@ -352,17 +353,37 @@ def fig_delta_scatter(r: PPResults, ex: Example):
         label="Mapped genes",
     )
     ax.scatter(ex.dt[ex.de], ex.dp[ex.de], s=18, c=RED, label=f"Top-{N_DE} DE genes")
-    for g in ex.de[np.argsort(-np.abs(ex.dt[ex.de]))][:6]:
-        ax.annotate(
-            r.genes[g],
-            (ex.dt[g], ex.dp[g]),
-            xytext=(3, 3),
-            textcoords="offset points",
-            fontsize=7,
-        )
     lo, hi = min(ex.dt[mi].min(), ex.dp[mi].min()), max(
         ex.dt[mi].max(), ex.dp[mi].max()
     )
+    span = hi - lo
+    # Label the largest DE effects away from the point cloud: up-regulated genes
+    # above the diagonal, down-regulated genes below it, spread so labels do not
+    # overlap each other, each tied to its point by a leader line.
+    labelled = ex.de[np.argsort(-np.abs(ex.dt[ex.de]))][:6]
+    for sign in (1, -1):
+        gs = np.array([g for g in labelled if np.sign(ex.dt[g]) == sign], dtype=int)
+        if not len(gs):
+            continue
+        gs = gs[np.argsort(sign * ex.dt[gs])]  # nearest to the origin first
+        ys = ex.dp[gs[0]] + sign * 0.07 * span * (1 + 0.8 * np.arange(len(gs)))
+        xs = ex.dt[gs] - sign * 0.16 * span
+        for g, x, y in zip(gs, xs, ys):
+            ax.annotate(
+                r.genes[g],
+                (ex.dt[g], ex.dp[g]),
+                xytext=(x, y),
+                textcoords="data",
+                fontsize=7,
+                ha="right" if sign > 0 else "left",
+                va="center",
+                arrowprops={
+                    "arrowstyle": "-",
+                    "lw": 0.5,
+                    "color": "#555",
+                    "shrinkB": 2,
+                },
+            )
     ax.plot([lo, hi], [lo, hi], ls="--", c="#888", lw=1)
     ax.axhline(0, lw=0.7, c="#aaa")
     ax.axvline(0, lw=0.7, c="#aaa")
@@ -375,7 +396,7 @@ def fig_delta_scatter(r: PPResults, ex: Example):
         ha="right",
         va="bottom",
     )
-    ax.legend(frameon=False, loc="upper left", fontsize=8)
+    boxed_legend(ax, loc="upper left")
     return fig
 
 
@@ -384,7 +405,8 @@ def fig_top_de(r: PPResults, ex: Example):
 
     de = ex.de
     pos = np.arange(len(de))
-    fig, ax = plt.subplots(figsize=(5.2, 0.28 * len(de) + 1.2))
+    # Same height as fig_single_cell for 20 genes, so the two align side by side.
+    fig, ax = plt.subplots(figsize=(5.2, 0.2 * len(de) + 1.0))
     ax.barh(pos - 0.18, ex.dt[de], height=0.36, color=TEAL, label="Observed")
     ax.barh(pos + 0.18, ex.dp[de], height=0.36, color=ORANGE, label="Predicted")
     ax.axvline(0, lw=0.7, c="#666")
@@ -423,7 +445,7 @@ def fig_single_cell(r: PPResults, ex: Example, g: int):
             pd.DataFrame({"group": groups[2], "expr": r.pred[ex.rows, g]}),
         ]
     )
-    fig, ax = plt.subplots(figsize=(5, 4.5))
+    fig, ax = plt.subplots(figsize=(4.6, 5))
     sns.violinplot(
         data=vdf,
         x="group",
@@ -572,13 +594,19 @@ def fig_history(status: dict, which: str):
     if which == "loss":
         ax.plot(ep, [x["train_mse"] for x in h], "o-", label="Training MSE")
         ax.plot(ep, [x["val"]["mse"] for x in h], "o-", label="Validation MSE")
-        ax.plot(
-            ep,
-            [x["val"]["control_baseline_mse"] for x in h],
-            "--",
-            c="#888",
-            label="Validation, control-input baseline",
-        )
+        # The control-input baseline is far above both curves; drawing it would
+        # compress them, so it is stated as a note instead.
+        base = [x["val"].get("control_baseline_mse") for x in h]
+        if all(b is not None for b in base):
+            ax.annotate(
+                f"Validation MSE of the control-input baseline: {np.mean(base):.3f} (off scale)",
+                (0.5, 1.02),
+                xycoords="axes fraction",
+                ha="center",
+                va="bottom",
+                fontsize=7,
+                color="#555",
+            )
         ax.set_ylabel("MSE")
     else:
         ax.plot(ep, [x["val"]["pearson_delta"] for x in h], "o-", label="Pearson Δ")
@@ -593,7 +621,7 @@ def fig_history(status: dict, which: str):
         best, ls=":", c="#555", lw=1, label=f"Selected checkpoint (epoch {best})"
     )
     ax.set(xlabel="Epoch", xticks=ep)
-    ax.legend(frameon=False, fontsize=8)
+    boxed_legend(ax, loc="center right")
     return fig
 
 
@@ -887,8 +915,9 @@ def _save_history(w: FigureWriter, training: dict, ds: str) -> None:
         "training_loss",
         title=f"PP fine-tuning loss ({ds})",
         caption_short=f"Training and validation MSE during PP fine-tuning on {ds}.",
-        caption_long=f"Per-epoch MSE on the training and validation sets; dashed: validation error of the "
-        f"control-input baseline as logged by the run. Dotted line: selected checkpoint (epoch {best}, "
+        caption_long=f"Per-epoch MSE on the training and validation sets; the note above the panel gives the "
+        f"validation error of the control-input baseline as logged by the run, which lies above the plotted "
+        f"range. Dotted line: selected checkpoint (epoch {best}, "
         f"highest validation Pearson Δ). Training stopped after epoch {h[-1]['epoch']}.",
         description=f"Validation MSE stays within {min(x['val']['mse'] for x in h):.4f}–"
         f"{max(x['val']['mse'] for x in h):.4f} over all epochs while training MSE falls from "

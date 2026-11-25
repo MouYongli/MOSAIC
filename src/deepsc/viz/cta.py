@@ -43,6 +43,7 @@ from deepsc.viz._common import (
     Checks,
     FigureWriter,
     apply_style,
+    boxed_legend,
     load_dataset_config,
     spread_labels,
     training_record,
@@ -418,8 +419,9 @@ def fig_flows(mat, order, colors):
                 lw=0,
             )
         )
-    lab_l = spread_labels(left0 + row / (2 * n), gap=0.026)
-    lab_r = spread_labels(right0 + col / (2 * n), gap=0.026)
+    mid_l, mid_r = left0 + row / (2 * n), right0 + col / (2 * n)
+    lab_l = spread_labels(mid_l, gap=0.03)
+    lab_r = spread_labels(mid_r, gap=0.03)
     for k, name in enumerate(order):
         ax.plot(
             [0.15, 0.15],
@@ -436,11 +438,18 @@ def fig_flows(mat, order, colors):
             solid_capstyle="butt",
         )
         ax.text(
-            0.125, lab_l[k], f"{name}  {row[k]}", ha="right", va="center", fontsize=8
+            0.115, lab_l[k], f"{name}  {row[k]}", ha="right", va="center", fontsize=8
         )
         ax.text(
-            0.875, lab_r[k], f"{name}  {col[k]}", ha="left", va="center", fontsize=8
+            0.885, lab_r[k], f"{name}  {col[k]}", ha="left", va="center", fontsize=8
         )
+        # Leader lines tie labels that were pushed apart back to their bars.
+        for xa, xb, lab, mid in (
+            (0.119, 0.141, lab_l, mid_l),
+            (0.881, 0.859, lab_r, mid_r),
+        ):
+            if abs(lab[k] - mid[k]) > 0.004:
+                ax.plot([xa, xb], [lab[k], mid[k]], color="#777", lw=0.5)
     ax.set(xlim=(-0.12, 1.15), ylim=(1.015, -0.05))
     ax.text(0.15, -0.03, "Ground truth", ha="center", weight="bold")
     ax.text(0.85, -0.03, "Prediction", ha="center", weight="bold")
@@ -466,7 +475,7 @@ def fig_history(status: dict, which: str):
         best, ls="--", c="#888", lw=1, label=f"Selected checkpoint (epoch {best})"
     )
     ax.set(xlabel="Epoch", xticks=ep)
-    ax.legend(frameon=False, fontsize=8)
+    boxed_legend(ax, loc="best")
     return fig
 
 
