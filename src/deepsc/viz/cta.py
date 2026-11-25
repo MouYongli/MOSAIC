@@ -1,7 +1,8 @@
 """Cell type annotation (CTA) figures from saved DeepSC test predictions.
 
 Usage:
-    python -m deepsc.viz.cta [--run-dir DIR] [--h5ad FILE] [--out DIR] [--class-names JSON]
+    python -m deepsc.viz.cta [--run-dir DIR] [--h5ad FILE] [--out DIR]
+                             [--dataset-label Zheng] [--class-names JSON]
 
 Inputs:
   * ``<run-dir>/test_predictions.npz``: ``logits``, ``labels``, ``cell_ids``,
@@ -9,8 +10,9 @@ Inputs:
   * ``<run-dir>/status.json``: run record with test metrics and epoch history;
   * the test ``.h5ad`` the predictions were made on (raw counts, ``obs[celltype]``).
 
-Outputs (in ``--out``): ``cta_annotation_comparison.png``, ``cta_annotation_flows.png``,
-``cta_training_history.png``, ``cta_cells.csv`` and ``cta_per_class_metrics.csv``.
+Writes ``<out>/cta/<dataset>/`` (see :mod:`deepsc.viz._common` for the layout):
+one untitled figure per panel, each with a ``.json`` sidecar holding its title,
+short and long caption and a text description.
 
 The UMAP is computed from the test cells' expression (TP10K, log1p, 2,000 HVGs,
 50 PCs); it is a display layout, not a model embedding. Class codes are shown as
@@ -36,8 +38,9 @@ import argparse
 from deepsc.viz._common import (
     DOWNSTREAM_RUN_ROOT,
     Checks,
+    FigureWriter,
+    apply_style,
     read_status,
-    savefig,
     spread_labels,
     use_headless_backend,
 )
@@ -46,6 +49,12 @@ DEFAULT_RUN_DIR = DOWNSTREAM_RUN_ROOT / "cta_zheng_1215"
 DEFAULT_H5AD = Path("/DATA2/DeepSC/cell_type_annotation/zheng_test.h5ad")
 CELLTYPE_COL = "celltype"
 SEED = 0
+UMAP_METHOD = (
+    "computed from expression (library size normalized to 10,000 counts, log1p, 2,000 highly variable "
+    "genes, 50 principal components, 15 nearest neighbours)"
+)
+
+# --------------------------------------------------------------------------- data
 
 
 @dataclass
@@ -174,6 +183,23 @@ def per_class_metrics(
     return mat, table
 
 
+def top_confusions(mat: np.ndarray, order: list[str], k: int = 5) -> list[dict]:
+    """Largest off-diagonal cells: true class, predicted class, count, % of the true class."""
+    off = mat.copy()
+    np.fill_diagonal(off, 0)
+    idx = np.dstack(np.unravel_index(np.argsort(-off, axis=None), off.shape))[0][:k]
+    return [
+        {
+            "true": order[i],
+            "predicted": order[j],
+            "cells": int(off[i, j]),
+            "pct_of_true": 100 * off[i, j] / mat[i].sum(),
+        }
+        for i, j in idx
+        if off[i, j] > 0
+    ]
+
+
 def palette(order: list[str]) -> dict:
     import seaborn as sns
 
@@ -182,140 +208,161 @@ def palette(order: list[str]) -> dict:
     return {lab: base[picks[i % len(picks)]] for i, lab in enumerate(order)}
 
 
-def plot_overview(df, mat, metrics, order, colors, title_suffix, path: Path) -> Path:
+def _fmt_list(items: list[str]) -> str:
+    return (
+        ", ".join(items[:-1]) + (" and " if len(items) > 1 else "") + items[-1]
+        if items
+        else "none"
+    )
+
+
+# ------------------------------------------------------------------------ figures
+
+
+def _umap_axes(ax):
+    ax.set(xlabel="UMAP 1", ylabel="UMAP 2", xticks=[], yticks=[])
+    ax.set_aspect("equal", adjustable="datalim")
+    ax.grid(False)
+
+
+def fig_umap_labels(df, col, order, colors):
     import matplotlib.pyplot as plt
-    import seaborn as sns
 
-    sns.set_theme(style="white", context="notebook", font_scale=0.94)
-    support = metrics.support.to_numpy()
-    acc = (df.ground_truth == df.prediction).mean()
-    fig = plt.figure(figsize=(20, 14.5), layout="constrained")
-    gs = fig.add_gridspec(2, 3, height_ratios=[1.0, 1.12])
-    top = [fig.add_subplot(gs[0, i]) for i in range(3)]
-    ax_num, ax_norm, ax_metric = (fig.add_subplot(gs[1, i]) for i in range(3))
-
-    xl, yl = "UMAP 1 (expression)", "UMAP 2 (expression)"
-    for ax, col, title in zip(
-        top[:2],
-        ["ground_truth", "prediction"],
-        ["A · Ground truth", "B · DeepSC prediction"],
-    ):
-        for label in order:
-            d = df[df[col] == label]
-            ax.scatter(
-                d.UMAP1,
-                d.UMAP2,
-                s=4,
-                color=colors[label],
-                alpha=0.8,
-                label=label,
-                linewidths=0,
-                rasterized=True,
-            )
-        ax.set(title=title, xlabel=xl, ylabel=yl)
-        ax.set_aspect("equal", adjustable="datalim")
-    top[1].legend(
-        loc="upper center",
-        bbox_to_anchor=(0.5, -0.12),
-        ncol=4,
+    fig, ax = plt.subplots(figsize=(6.2, 5))
+    for label in order:
+        d = df[df[col] == label]
+        ax.scatter(
+            d.UMAP1,
+            d.UMAP2,
+            s=3,
+            color=colors[label],
+            alpha=0.8,
+            label=label,
+            linewidths=0,
+            rasterized=True,
+        )
+    _umap_axes(ax)
+    ax.legend(
+        loc="center left",
+        bbox_to_anchor=(1.01, 0.5),
         frameon=False,
-        fontsize=9,
-        markerscale=3,
+        markerscale=4,
+        fontsize=8,
     )
+    return fig
+
+
+def fig_umap_errors(df):
+    import matplotlib.pyplot as plt
+
     wrong = (df.ground_truth != df.prediction).to_numpy()
-    top[2].scatter(
-        df.UMAP1, df.UMAP2, s=3, c="#dce2e8", alpha=0.5, linewidths=0, rasterized=True
+    fig, ax = plt.subplots(figsize=(5, 5))
+    ax.scatter(
+        df.UMAP1,
+        df.UMAP2,
+        s=3,
+        c="#dce2e8",
+        alpha=0.6,
+        linewidths=0,
+        rasterized=True,
+        label="Correct",
     )
-    top[2].scatter(
+    ax.scatter(
         df.UMAP1[wrong],
         df.UMAP2[wrong],
-        s=6,
+        s=5,
         c="#d4464c",
         alpha=0.75,
         linewidths=0,
         rasterized=True,
+        label="Misclassified",
     )
-    top[2].set(
-        title=f"C · Misclassified cells ({wrong.sum():,} / {len(df):,})",
-        xlabel=xl,
-        ylabel=yl,
-    )
-    top[2].set_aspect("equal", adjustable="datalim")
+    _umap_axes(ax)
+    ax.legend(loc="lower left", frameon=False, markerscale=4, fontsize=8)
+    return fig
 
-    ylab = [f"{name} (n={n})" for name, n in zip(order, support)]
-    heat = dict(
+
+def fig_confusion(mat, order, normalized: bool):
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    support = mat.sum(1)
+    fig, ax = plt.subplots(figsize=(7, 6))
+    kw = dict(
         xticklabels=order,
         linewidths=0.3,
         linecolor="white",
         annot=True,
-        annot_kws={"fontsize": 8},
+        annot_kws={"fontsize": 7},
+        ax=ax,
     )
-    sns.heatmap(
-        mat, fmt="d", cmap="Blues", cbar=False, yticklabels=ylab, ax=ax_num, **heat
-    )
-    ax_num.set(title="D · Confusion counts", xlabel="Predicted", ylabel="Ground truth")
-    with np.errstate(invalid="ignore", divide="ignore"):
-        row_pct = 100 * mat / support[:, None]
-    sns.heatmap(
-        row_pct,
-        fmt=".0f",
-        cmap="YlGnBu",
-        vmin=0,
-        vmax=100,
-        cbar_kws={"label": "% of true class"},
-        yticklabels=order,
-        ax=ax_norm,
-        **heat,
-    )
-    ax_norm.set(
-        title="E · Row-normalized confusion (%)",
-        xlabel="Predicted",
-        ylabel="Ground truth",
-    )
-    for ax in (ax_num, ax_norm):
-        ax.tick_params(axis="x", labelrotation=45)
-        ax.tick_params(axis="y", labelrotation=0)
+    if normalized:
+        with np.errstate(invalid="ignore", divide="ignore"):
+            pct = 100 * mat / support[:, None]
+        sns.heatmap(
+            pct,
+            fmt=".0f",
+            cmap="YlGnBu",
+            vmin=0,
+            vmax=100,
+            cbar_kws={"label": "% of true class"},
+            yticklabels=order,
+            **kw,
+        )
+    else:
+        sns.heatmap(
+            mat,
+            fmt="d",
+            cmap="Blues",
+            cbar=False,
+            yticklabels=[f"{n} (n={s})" for n, s in zip(order, support)],
+            **kw,
+        )
+    ax.set(xlabel="Predicted", ylabel="Ground truth")
+    ax.tick_params(axis="x", labelrotation=45)
+    ax.tick_params(axis="y", labelrotation=0)
+    return fig
 
+
+def fig_per_class(metrics: pd.DataFrame):
+    import matplotlib.pyplot as plt
+
+    order = list(metrics.index)
     yy, h = np.arange(len(order)), 0.26
+    fig, ax = plt.subplots(figsize=(6.5, 6))
     for off, col, color, lab in [
         (-h, "recall", "#3182bd", "Recall"),
         (0, "precision", "#f39c65", "Precision"),
         (h, "f1", "#48a78d", "F1"),
     ]:
-        ax_metric.barh(yy + off, metrics[col], height=h, color=color, label=lab)
+        ax.barh(yy + off, metrics[col], height=h, color=color, label=lab)
     for y, v, n_ok in zip(yy, metrics.f1, metrics.correct):
-        ax_metric.text(
-            v + 0.01, y + h, f"{v:.2f}", va="center", fontsize=8, color="#2d6e5c"
-        )
-        if n_ok == 0:
-            ax_metric.text(
+        if n_ok > 0:
+            ax.text(
+                v + 0.01, y + h, f"{v:.2f}", va="center", fontsize=7, color="#2d6e5c"
+            )
+        else:
+            ax.text(
                 0.01,
                 y,
                 "no correct predictions",
                 va="center",
-                fontsize=8,
+                fontsize=7,
                 color="#d4464c",
             )
-    ax_metric.set(
+    ax.set(
         yticks=yy,
-        yticklabels=ylab,
-        xlim=(0, 1.04),
+        yticklabels=[f"{n} (n={s})" for n, s in zip(order, metrics.support)],
+        xlim=(0, 1.06),
         xlabel="Score",
-        title="F · Per-class metrics (test set)",
     )
-    ax_metric.invert_yaxis()
-    ax_metric.legend(frameon=False, ncol=3, loc="lower right")
-    ax_metric.grid(axis="x", alpha=0.25)
-
-    fig.suptitle(
-        f"Cell type annotation · {title_suffix} (accuracy {acc:.2%}, macro-F1 {metrics.f1.mean():.3f})",
-        fontsize=17,
-        weight="bold",
-    )
-    return savefig(fig, path, dpi=175)
+    ax.invert_yaxis()
+    ax.legend(frameon=False, ncol=3, loc="upper center", bbox_to_anchor=(0.5, -0.12))
+    ax.grid(axis="y", visible=False)
+    return fig
 
 
-def plot_flows(mat, order, colors, title, path: Path) -> Path:
+def fig_flows(mat, order, colors):
     """Sankey-style flows: ribbon width = cells; colored = correct, gray = mismatch."""
     import matplotlib.pyplot as plt
     from matplotlib.patches import PathPatch
@@ -336,7 +383,7 @@ def plot_flows(mat, order, colors, title, path: Path) -> Path:
         MplPath.CURVE4,
         MplPath.CLOSEPOLY,
     ]
-    fig, ax = plt.subplots(figsize=(13, 8.5), layout="constrained")
+    fig, ax = plt.subplots(figsize=(9, 7))
     for i, j in zip(*np.nonzero(mat)):  # row-major order tiles each bar exactly
         h = mat[i, j] / n
         a, b = left0[i] + used_l[i], right0[j] + used_r[j]
@@ -362,65 +409,59 @@ def plot_flows(mat, order, colors, title, path: Path) -> Path:
                 lw=0,
             )
         )
-    lab_l = spread_labels(left0 + row / (2 * n), gap=0.024)
-    lab_r = spread_labels(right0 + col / (2 * n), gap=0.024)
+    lab_l = spread_labels(left0 + row / (2 * n), gap=0.026)
+    lab_r = spread_labels(right0 + col / (2 * n), gap=0.026)
     for k, name in enumerate(order):
         ax.plot(
             [0.15, 0.15],
             [left0[k], left0[k] + row[k] / n],
             color=colors[name],
-            lw=12,
+            lw=10,
             solid_capstyle="butt",
         )
         ax.plot(
             [0.85, 0.85],
             [right0[k], right0[k] + col[k] / n],
             color=colors[name],
-            lw=12,
+            lw=10,
             solid_capstyle="butt",
         )
         ax.text(
-            0.125, lab_l[k], f"{name}  {row[k]}", ha="right", va="center", fontsize=9
+            0.125, lab_l[k], f"{name}  {row[k]}", ha="right", va="center", fontsize=8
         )
         ax.text(
-            0.875, lab_r[k], f"{name}  {col[k]}", ha="left", va="center", fontsize=9
+            0.875, lab_r[k], f"{name}  {col[k]}", ha="left", va="center", fontsize=8
         )
-    ax.set(xlim=(-0.12, 1.15), ylim=(1.015, -0.015))
-    ax.set_title(title, pad=30)
-    ax.text(0.15, -0.04, "GROUND TRUTH", ha="center", weight="bold")
-    ax.text(0.85, -0.04, "PREDICTION", ha="center", weight="bold")
-    ax.text(
-        0.5,
-        1.035,
-        "Ribbon width = cell count · colored: correct · gray: mismatch",
-        ha="center",
-        va="top",
-        fontsize=10,
-        color="#56616c",
-    )
+    ax.set(xlim=(-0.12, 1.15), ylim=(1.015, -0.05))
+    ax.text(0.15, -0.03, "Ground truth", ha="center", weight="bold")
+    ax.text(0.85, -0.03, "Prediction", ha="center", weight="bold")
     ax.axis("off")
-    return savefig(fig, path, dpi=175)
+    return fig
 
 
-def plot_history(status: dict, title: str, path: Path) -> Path:
+def fig_history(status: dict, which: str):
     import matplotlib.pyplot as plt
 
     h, best = status["history"], status["best_epoch"]
-    ep = [r["epoch"] for r in h]
-    fig, ax = plt.subplots(1, 2, figsize=(12, 4.2), layout="constrained")
-    ax[0].plot(ep, [r["train_loss"] for r in h], "o-", label="Train loss")
-    ax[0].plot(ep, [r["val"]["loss"] for r in h], "o-", label="Validation loss")
-    ax[1].plot(ep, [r["val"]["accuracy"] for r in h], "o-", label="Validation accuracy")
-    ax[1].plot(ep, [r["val"]["macro_f1"] for r in h], "o-", label="Validation macro-F1")
-    for a, ylabel in zip(ax, ["Cross-entropy loss", "Score"]):
-        a.axvline(best, ls="--", c="#888", lw=1)
-        a.set(xlabel="Epoch", ylabel=ylabel, xticks=ep)
-        a.legend(frameon=False)
-        a.grid(alpha=0.25)
-    ax[0].set_title(f"A · Loss (best checkpoint = epoch {best}, min val loss)")
-    ax[1].set_title("B · Validation metrics")
-    fig.suptitle(title, fontsize=14, weight="bold")
-    return savefig(fig, path, dpi=160)
+    ep = [x["epoch"] for x in h]
+    fig, ax = plt.subplots(figsize=(5.5, 3.8))
+    if which == "loss":
+        ax.plot(ep, [x["train_loss"] for x in h], "o-", label="Training")
+        ax.plot(ep, [x["val"]["loss"] for x in h], "o-", label="Validation")
+        ax.set_ylabel("Cross-entropy loss")
+    else:
+        ax.plot(ep, [x["val"]["accuracy"] for x in h], "o-", label="Accuracy")
+        ax.plot(ep, [x["val"]["macro_f1"] for x in h], "o-", label="Macro-F1")
+        ax.set_ylabel("Validation score")
+    ax.axvline(
+        best, ls="--", c="#888", lw=1, label=f"Selected checkpoint (epoch {best})"
+    )
+    ax.set(xlabel="Epoch", xticks=ep)
+    ax.legend(frameon=False, fontsize=8)
+    return fig
+
+
+# ----------------------------------------------------------------------- pipeline
 
 
 def run(
@@ -429,9 +470,8 @@ def run(
     out: Path,
     class_names: dict[str, str] | None = None,
     dataset_label: str = "Zheng",
-) -> pd.DataFrame:
-    """Verify, then write all CTA figures and tables to ``out``. Returns per-class metrics."""
-    out.mkdir(parents=True, exist_ok=True)
+) -> FigureWriter:
+    """Verify, then write all CTA figures, metadata and tables. Returns the writer."""
     r = load(run_dir, h5ad)
     print("Verification:")
     checks = verify(r)
@@ -441,43 +481,208 @@ def run(
     display, order = class_order(r.classes, class_names)
     df = cell_table(r, display, expression_umap(r.adata))
     mat, metrics = per_class_metrics(df, order)
-    # The display-ordered matrix must be a permutation of the stored one.
     perm = sorted(
         range(len(r.classes)), key=lambda k: order.index(display[r.classes[k]])
     )
-    Checks(
-        {
-            "plotted confusion matrix == stored (reordered)": bool(
-                (mat == r.stored_confusion[np.ix_(perm, perm)]).all()
-            )
-        }
-    ).report()
+    checks.add(
+        "plotted confusion matrix == stored (display order)",
+        (mat == r.stored_confusion[np.ix_(perm, perm)]).all(),
+    )
+    checks.require()
 
+    apply_style()
     colors = palette(order)
-    plot_overview(
-        df,
-        mat,
-        metrics,
-        order,
-        colors,
-        f"DeepSC fine-tuned on {dataset_label} · test set",
-        out / "cta_annotation_comparison.png",
+    w = FigureWriter(
+        out,
+        "cta",
+        dataset_label,
+        dataset_label,
+        {
+            "predictions": run_dir / "test_predictions.npz",
+            "run_record": run_dir / "status.json",
+            "h5ad": h5ad,
+        },
     )
-    plot_flows(
-        mat,
-        order,
-        colors,
-        f"Ground truth → DeepSC prediction · {dataset_label} test cells",
-        out / "cta_annotation_flows.png",
+    ds, n, k = dataset_label, len(df), len(order)
+    acc, mf1 = float((df.ground_truth == df.prediction).mean()), float(
+        metrics.f1.mean()
     )
-    plot_history(
-        r.status,
-        f"CTA fine-tuning history · {dataset_label}",
-        out / "cta_training_history.png",
+    n_wrong = int((df.ground_truth != df.prediction).sum())
+    conf = top_confusions(mat, order)
+    size_diff = np.argsort(-np.abs(mat.sum(0) - mat.sum(1)))[:3]
+    size_txt = _fmt_list(
+        [
+            f"{order[i]} ({mat.sum(1)[i]} reference vs {mat.sum(0)[i]} predicted)"
+            for i in size_diff
+        ]
     )
-    df.to_csv(out / "cta_cells.csv", index=False)
-    metrics.round(4).to_csv(out / "cta_per_class_metrics.csv")
-    return metrics
+    top_share = sum(c["cells"] for c in conf) / max(n_wrong, 1)
+    conf_txt = "; ".join(
+        f"{c['true']} → {c['predicted']}: {c['cells']} cells ({c['pct_of_true']:.0f}%)"
+        for c in conf[:4]
+    )
+    low = list(metrics.index[metrics.recall < 0.5])
+    high = list(metrics.index[metrics.f1 >= 0.85])
+    zero = list(metrics.index[metrics.correct == 0])
+    names_note = (
+        "Cell types are shown by their dataset codes because the source annotation stores no names."
+        if not class_names
+        else ""
+    )
+    sel = f"The checkpoint with the lowest validation loss (epoch {r.status['best_epoch']}) was evaluated."
+    base = {"cells": n, "classes": k, "accuracy": acc, "macro_f1": mf1}
+
+    w.save(
+        fig_umap_labels(df, "ground_truth", order, colors),
+        "umap_ground_truth",
+        title=f"{ds} test cells colored by reference annotation",
+        caption_short=f"Reference cell type annotation of the {ds} test set.",
+        caption_long=f"UMAP of {n:,} {ds} test cells, {UMAP_METHOD}, colored by the reference annotation "
+        f"({k} cell types). {names_note}".strip(),
+        description="Each dot is one test cell; position reflects expression similarity only and is identical "
+        "across the three UMAP panels, so the reference labels here can be compared directly with "
+        "the DeepSC predictions and the error map. Separated islands correspond to distinct cell "
+        "populations; populations that overlap in this layout are expected to be harder to tell "
+        "apart.",
+        metrics=base,
+    )
+    w.save(
+        fig_umap_labels(df, "prediction", order, colors),
+        "umap_prediction",
+        title=f"{ds} test cells colored by DeepSC prediction",
+        caption_short=f"DeepSC cell type predictions on the {ds} test set.",
+        caption_long=f"Same UMAP layout as the reference panel, colored by the cell type predicted by fine-tuned "
+        f"DeepSC (argmax of the classifier logits). Overall accuracy {acc:.1%}, macro-F1 {mf1:.3f}. "
+        f"{sel} {names_note}".strip(),
+        description=f"Compare with the reference panel cell by cell: same layout, different labels. "
+        f"{acc:.1%} of cells receive their reference label. Predicted class sizes differ most from "
+        f"the reference for {size_txt}.",
+        metrics={**base, "predicted_class_sizes": dict(zip(order, mat.sum(0)))},
+    )
+    w.save(
+        fig_umap_errors(df),
+        "umap_errors",
+        title=f"Misclassified {ds} test cells",
+        caption_short=f"Location of misclassified cells ({n_wrong:,} of {n:,}).",
+        caption_long=f"Same UMAP layout; cells whose DeepSC prediction differs from the reference annotation are "
+        f"shown in red ({n_wrong:,} of {n:,} cells, {n_wrong / n:.1%}), correctly classified cells "
+        f"in gray.",
+        description=f"Red cells mark where the classifier disagrees with the reference. The {len(conf)} largest "
+        f"class-to-class confusions account for {top_share:.0%} of all errors, i.e. errors are "
+        f"{'concentrated in a few' if top_share >= 0.5 else 'spread over many'} pairs of cell types; "
+        f"the largest are {conf_txt}. Compare with the reference panel to see whether these pairs "
+        f"overlap in expression space.",
+        metrics={**base, "misclassified": n_wrong, "top_confusions": conf},
+    )
+    w.save(
+        fig_confusion(mat, order, normalized=False),
+        "confusion_counts",
+        title=f"Confusion matrix (cell counts), {ds}",
+        caption_short=f"Confusion matrix of DeepSC on the {ds} test set (counts).",
+        caption_long=f"Rows: reference cell type (with number of test cells); columns: predicted cell type; "
+        f"entries: number of cells. Diagonal entries are correct predictions ({n - n_wrong:,} of "
+        f"{n:,}).",
+        description=f"Read along a row to see where the cells of one reference type were assigned. Large "
+        f"off-diagonal entries mark systematic confusions: {conf_txt}. Class sizes are highly "
+        f"imbalanced (from {metrics.support.min()} to {metrics.support.max():,} cells), so counts are "
+        f"dominated by the largest classes; see the row-normalized matrix for per-class rates.",
+        metrics={**base, "confusion_matrix": mat, "order": order},
+    )
+    w.save(
+        fig_confusion(mat, order, normalized=True),
+        "confusion_row_normalized",
+        title=f"Row-normalized confusion matrix, {ds}",
+        caption_short=f"Per-class assignment rates of DeepSC on the {ds} test set.",
+        caption_long="Each row is normalized to 100% of the cells of that reference type; the diagonal equals "
+        "per-class recall. Rows: reference cell type; columns: predicted cell type.",
+        description=f"The diagonal shows how often each type is recovered. Recall is below 50% for "
+        f"{_fmt_list(low)}; {_fmt_list(zero)} had no correctly classified cells. Off-diagonal mass "
+        f"shows where misassigned cells go, e.g. {conf_txt}.",
+        metrics={**base, "recall": dict(zip(order, metrics.recall))},
+    )
+    w.save(
+        fig_per_class(metrics),
+        "per_class_metrics",
+        title=f"Per-class precision, recall and F1, {ds}",
+        caption_short=f"Per-class classification metrics on the {ds} test set.",
+        caption_long=f"Recall, precision and F1 for each reference cell type (number of test cells in "
+        f"parentheses). Macro-F1 ({mf1:.3f}) is the unweighted mean of the per-class F1 scores; "
+        f"accuracy is {acc:.1%}.",
+        description=f"F1 is at least 0.85 for {_fmt_list(high)}. The gap between accuracy ({acc:.1%}) and "
+        f"macro-F1 ({mf1:.3f}) comes from small or ambiguous classes with low recall "
+        f"({_fmt_list(low)}), which weigh equally in the macro average.",
+        metrics={**base, "per_class": metrics.round(4).to_dict(orient="index")},
+    )
+    w.save(
+        fig_flows(mat, order, colors),
+        "flows",
+        title=f"Reference-to-prediction flows, {ds}",
+        caption_short=f"Flow of {ds} test cells from reference to predicted cell types.",
+        caption_long="Left: reference cell types; right: predicted cell types; bar heights and ribbon widths are "
+        "proportional to cell counts. Colored ribbons are correct assignments, gray ribbons are "
+        "misassignments.",
+        description="An alternative view of the confusion matrix that emphasizes how large each misassignment is "
+        "relative to the class sizes, and how predicted class sizes differ from the reference. It "
+        "carries the same information as the confusion matrix and is suited to supplementary "
+        "material.",
+        metrics={
+            **base,
+            "reference_sizes": dict(zip(order, mat.sum(1))),
+            "predicted_sizes": dict(zip(order, mat.sum(0))),
+        },
+    )
+
+    h = r.status["history"]
+    best = r.status["best_epoch"]
+    bv = next(x["val"] for x in h if x["epoch"] == best)
+    last = h[-1]
+    mono = all(b["train_loss"] < a["train_loss"] for a, b in zip(h, h[1:]))
+    best_f1 = max(h, key=lambda x: x["val"]["macro_f1"])
+    w.save(
+        fig_history(r.status, "loss"),
+        "training_loss",
+        title=f"CTA fine-tuning loss, {ds}",
+        caption_short=f"Training and validation loss during CTA fine-tuning on {ds}.",
+        caption_long=f"Cross-entropy loss per epoch on the training and validation sets. The dashed line marks "
+        f"the checkpoint with the lowest validation loss (epoch {best}), which was used for all test "
+        f"results. Training stopped after epoch {last['epoch']} (early stopping).",
+        description=f"Training loss {'decreases monotonically' if mono else 'decreases'} from "
+        f"{h[0]['train_loss']:.3f} to {last['train_loss']:.3f}. Validation loss reaches its minimum "
+        f"({bv['loss']:.3f}) at epoch {best}"
+        + (
+            f" and ends at {last['val']['loss']:.3f} (epoch {last['epoch']}); the widening gap to the "
+            f"training loss indicates the onset of overfitting."
+            if last["epoch"] > best
+            else "."
+        ),
+        metrics={"history": h, "best_epoch": best},
+    )
+    w.save(
+        fig_history(r.status, "val"),
+        "training_validation_metrics",
+        title=f"CTA validation accuracy and macro-F1, {ds}",
+        caption_short=f"Validation accuracy and macro-F1 during CTA fine-tuning on {ds}.",
+        caption_long=f"Accuracy and macro-F1 on the validation set ({bv['cells']:,} cells) after each epoch; "
+        f"the dashed line marks the selected checkpoint (epoch {best}, lowest validation loss).",
+        description=f"At the selected checkpoint validation accuracy is {bv['accuracy']:.1%} and macro-F1 "
+        f"{bv['macro_f1']:.3f}. Best validation macro-F1 is {best_f1['val']['macro_f1']:.3f} at epoch "
+        f"{best_f1['epoch']}"
+        + (
+            "; because the checkpoint is selected by loss rather than macro-F1, the selection criterion "
+            "affects the reported test macro-F1 and should be stated."
+            if best_f1["epoch"] != best
+            else ", the same epoch as the selected checkpoint."
+        ),
+        metrics={"history": h, "best_epoch": best},
+    )
+
+    w.table(df, "cells", index=False)
+    w.table(metrics.round(4), "per_class_metrics")
+    w.finalize(
+        checks,
+        summary={**base, "misclassified": n_wrong, "recorded_test": r.status["test"]},
+    )
+    return w
 
 
 def main(argv=None) -> None:
@@ -494,17 +699,18 @@ def main(argv=None) -> None:
         default=DEFAULT_H5AD,
         help="test h5ad the predictions were made on",
     )
-    p.add_argument("--out", type=Path, default=Path("viz_outputs/cta"))
+    p.add_argument(
+        "--out", type=Path, default=Path("viz_outputs"), help="root output dir"
+    )
+    p.add_argument("--dataset-label", default="Zheng")
     p.add_argument(
         "--class-names", type=Path, help="optional JSON {code: name} for display"
     )
-    p.add_argument("--dataset-label", default="Zheng")
     args = p.parse_args(argv)
     use_headless_backend()
     names = json.loads(args.class_names.read_text()) if args.class_names else None
-    metrics = run(args.run_dir, args.h5ad, args.out, names, args.dataset_label)
-    print(metrics.round(3).to_string())
-    print("Saved to", args.out.resolve())
+    w = run(args.run_dir, args.h5ad, args.out, names, args.dataset_label)
+    print(f"Saved {len(w.records)} figures to {w.root.resolve()}")
 
 
 if __name__ == "__main__":

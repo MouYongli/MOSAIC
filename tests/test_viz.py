@@ -150,3 +150,44 @@ def test_pp_verify_reproduces_recorded_metrics_and_flags_mismatch():
 def test_mean_pairwise_r_identical_rows_is_one():
     row = np.array([1.0, -2.0, 0.5, 3.0])
     assert pp.mean_pairwise_r(np.vstack([row, 2 * row, row + 1])) == pytest.approx(1.0)
+
+
+def test_figure_writer_writes_untitled_figure_metadata_and_index(tmp_path):
+    import json
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from deepsc.viz._common import FigureWriter
+
+    w = FigureWriter(
+        tmp_path, "cta", "Zheng 68k", "Zheng 68k", {"h5ad": tmp_path / "x.h5ad"}
+    )
+    fig, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1])
+    w.save(
+        fig,
+        "demo",
+        title="T",
+        caption_short="S.",
+        caption_long="L.",
+        description="D.",
+        metrics={"r": np.float32(1)},
+    )
+    checks = Checks()
+    checks.add("ok", True)
+    w.finalize(checks, summary={"n": np.int64(3)})
+
+    root = tmp_path / "cta" / "zheng_68k"
+    meta = json.loads((root / "figures" / "cta_zheng_68k_demo.json").read_text())
+    assert {
+        meta[k] for k in ("title", "caption_short", "caption_long", "description")
+    } == {"T", "S.", "L.", "D."}
+    assert all((root / f).exists() for f in meta["files"].values())
+    manifest = json.loads((root / "manifest.json").read_text())
+    assert manifest["figures"][0]["id"] == "cta_zheng_68k_demo" and manifest[
+        "verification"
+    ] == {"ok": True}
+    assert "## 1. T" in (root / "README.md").read_text()

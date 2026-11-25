@@ -2,6 +2,7 @@
 
 Usage:
     python -m deepsc.viz.perturbation [--run-dir DIR] [--h5ad FILE] [--split PKL] [--out DIR]
+                                      [--dataset-label Adamson]
 
 Inputs:
   * ``<run-dir>/test_predictions.npz``: per test cell ``predictions`` and ``targets``
@@ -10,8 +11,9 @@ Inputs:
   * the GEARS ``perturb_processed.h5ad`` (control cells, ``uns[rank_genes_groups_cov_all]``);
   * the GEARS split pickle (training perturbations, for the train-mean baseline).
 
-Outputs (in ``--out``): ``pp_prediction_comparison.png``, ``pp_delta_heatmap.png``,
-``pp_training_history.png`` and ``pp_per_condition_metrics.csv``.
+Writes ``<out>/pp/<dataset>/`` (see :mod:`deepsc.viz._common` for the layout):
+one untitled figure per panel, each with a ``.json`` sidecar holding its title,
+short and long caption and a text description.
 
 Genes without a DeepSC vocabulary entry have predictions AND targets set to 0 in the
 saved arrays. With the original metric their delta is -control on both sides, which
@@ -23,6 +25,7 @@ every test perturbation (no learning involved).
 """
 
 from __future__ import annotations
+import json
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,8 +39,9 @@ import argparse
 from deepsc.viz._common import (
     DOWNSTREAM_RUN_ROOT,
     Checks,
+    FigureWriter,
+    apply_style,
     read_status,
-    savefig,
     use_headless_backend,
 )
 
@@ -230,221 +234,314 @@ def verify(r: PPResults, m: Means) -> Checks:
     return c
 
 
-# -------------------------------------------------------------------------- plots
+# ------------------------------------------------------------------------ figures
+
+BLUE, PURPLE, RED, ORANGE, TEAL, GRAY = (
+    "#386fa4",
+    "#ab6b9d",
+    "#d4464c",
+    "#e09a62",
+    "#3387a4",
+    "#8a96a3",
+)
+METRIC_NOTE = (
+    "Δ is the mean expression of a perturbation minus the mean of all control cells (log-normalized). "
+    "Only the {n_mapped:,} genes in the DeepSC vocabulary are used."
+)
 
 
-def plot_overview(r: PPResults, m: Means, pc: pd.DataFrame, path: Path) -> dict:
-    import matplotlib.pyplot as plt
-    import seaborn as sns
+def _fmt_list(items) -> str:
+    items = list(items)
+    return (
+        ", ".join(items[:-1]) + (" and " if len(items) > 1 else "") + items[-1]
+        if items
+        else "none"
+    )
 
-    sns.set_theme(style="whitegrid", font_scale=0.95)
-    mk, mi, genes = r.mapped, np.where(r.mapped)[0], r.genes
-    # Representative example: the condition with the median mapped-gene Δ correlation.
+
+@dataclass
+class Example:
+    """A representative condition (median mapped-gene Δ correlation) and its derived values."""
+
+    cond: str
+    pert: str
+    rows: np.ndarray
+    pm: np.ndarray
+    tm: np.ndarray
+    dp: np.ndarray
+    dt: np.ndarray
+    de: np.ndarray
+    r_abs: float
+    r_delta: float
+
+
+def pick_example(r: PPResults, m: Means, pc: pd.DataFrame) -> Example:
     srt = pc.sort_values("pearson_delta_mapped")
     cond = srt.index[len(srt) // 2]
-    s = r.cond == cond
-    pm, tm = m.pred[cond], m.target[cond]
+    pm, tm, mi = m.pred[cond], m.target[cond], np.where(r.mapped)[0]
+    de = m.de[cond][r.mapped[m.de[cond]]]
     dp, dt = pm - m.ctrl, tm - m.ctrl
-    de = m.de[cond][mk[m.de[cond]]]
-    r_abs, r_d = pearson(tm[mi], pm[mi]), pearson(dt[mi], dp[mi])
-    pert = cond.split("+")[0]
-
-    fig, ax = plt.subplots(2, 3, figsize=(19, 11.5), layout="constrained")
-    fig.suptitle(
-        f"Perturbation prediction · DeepSC · {len(pc)} unseen test perturbations "
-        f"({len(r.cond):,} cells, {mk.sum():,} mapped genes)",
-        fontsize=16,
-        weight="bold",
+    return Example(
+        cond,
+        cond.split("+")[0],
+        r.cond == cond,
+        pm,
+        tm,
+        dp,
+        dt,
+        de,
+        pearson(tm[mi], pm[mi]),
+        pearson(dt[mi], dp[mi]),
     )
 
-    a = ax[0, 0]  # absolute means: dominated by baseline expression
-    a.scatter(
-        tm[mi], pm[mi], s=6, c="#386fa4", alpha=0.5, linewidths=0, rasterized=True
+
+def fig_absolute(r: PPResults, ex: Example):
+    import matplotlib.pyplot as plt
+
+    mi = np.where(r.mapped)[0]
+    fig, ax = plt.subplots(figsize=(5, 5))
+    ax.scatter(
+        ex.tm[mi],
+        ex.pm[mi],
+        s=5,
+        c=BLUE,
+        alpha=0.5,
+        linewidths=0,
+        rasterized=True,
+        label="Mapped genes",
     )
-    a.scatter(tm[de], pm[de], s=22, c="#d4464c", label=f"Top-{N_DE} DE genes (mapped)")
-    lim = max(tm[mi].max(), pm[mi].max()) * 1.03
-    a.plot([0, lim], [0, lim], ls="--", c="#888", lw=1)
-    a.set(
+    ax.scatter(ex.tm[ex.de], ex.pm[ex.de], s=18, c=RED, label=f"Top-{N_DE} DE genes")
+    lim = max(ex.tm[mi].max(), ex.pm[mi].max()) * 1.03
+    ax.plot([0, lim], [0, lim], ls="--", c="#888", lw=1)
+    ax.set(
         xlabel="Observed mean expression",
         ylabel="Predicted mean expression",
-        title=f"A · Absolute expression · {cond} · r={r_abs:.3f}",
         xlim=(0, lim),
         ylim=(0, lim),
     )
-    a.legend(frameon=False, loc="upper left")
-
-    b = ax[0, 1]  # perturbation effect
-    b.scatter(
-        dt[mi], dp[mi], s=6, c="#ab6b9d", alpha=0.45, linewidths=0, rasterized=True
+    ax.set_aspect("equal")
+    ax.text(
+        0.97,
+        0.03,
+        f"{ex.pert}\nr = {ex.r_abs:.3f}",
+        transform=ax.transAxes,
+        ha="right",
+        va="bottom",
     )
-    b.scatter(dt[de], dp[de], s=22, c="#d4464c")
-    for g in de[np.argsort(-np.abs(dt[de]))][:6]:
-        b.annotate(
-            genes[g],
-            (dt[g], dp[g]),
+    ax.legend(frameon=False, loc="upper left", fontsize=8)
+    return fig
+
+
+def fig_delta_scatter(r: PPResults, ex: Example):
+    import matplotlib.pyplot as plt
+
+    mi = np.where(r.mapped)[0]
+    fig, ax = plt.subplots(figsize=(5, 5))
+    ax.scatter(
+        ex.dt[mi],
+        ex.dp[mi],
+        s=5,
+        c=PURPLE,
+        alpha=0.45,
+        linewidths=0,
+        rasterized=True,
+        label="Mapped genes",
+    )
+    ax.scatter(ex.dt[ex.de], ex.dp[ex.de], s=18, c=RED, label=f"Top-{N_DE} DE genes")
+    for g in ex.de[np.argsort(-np.abs(ex.dt[ex.de]))][:6]:
+        ax.annotate(
+            r.genes[g],
+            (ex.dt[g], ex.dp[g]),
             xytext=(3, 3),
             textcoords="offset points",
-            fontsize=8,
+            fontsize=7,
         )
-    lo, hi = min(dt[mi].min(), dp[mi].min()), max(dt[mi].max(), dp[mi].max())
-    b.plot([lo, hi], [lo, hi], ls="--", c="#888", lw=1)
-    b.axhline(0, lw=0.7, c="#aaa")
-    b.axvline(0, lw=0.7, c="#aaa")
-    b.set(
-        xlabel="Observed Δ vs control mean",
-        ylabel="Predicted Δ vs control mean",
-        title=f"B · Perturbation effect · {cond} · r={r_d:.3f}",
+    lo, hi = min(ex.dt[mi].min(), ex.dp[mi].min()), max(
+        ex.dt[mi].max(), ex.dp[mi].max()
     )
+    ax.plot([lo, hi], [lo, hi], ls="--", c="#888", lw=1)
+    ax.axhline(0, lw=0.7, c="#aaa")
+    ax.axvline(0, lw=0.7, c="#aaa")
+    ax.set(xlabel="Observed Δ", ylabel="Predicted Δ")
+    ax.text(
+        0.97,
+        0.03,
+        f"{ex.pert}\nr = {ex.r_delta:.3f}",
+        transform=ax.transAxes,
+        ha="right",
+        va="bottom",
+    )
+    ax.legend(frameon=False, loc="upper left", fontsize=8)
+    return fig
 
-    c_ = ax[0, 2]  # top DE genes
+
+def fig_top_de(r: PPResults, ex: Example):
+    import matplotlib.pyplot as plt
+
+    de = ex.de
     pos = np.arange(len(de))
-    c_.barh(pos - 0.18, dt[de], height=0.36, color="#3387a4", label="Observed Δ")
-    c_.barh(pos + 0.18, dp[de], height=0.36, color="#e09a62", label="Predicted Δ")
-    c_.axvline(0, lw=0.7, c="#666")
-    lo, hi = min(dt[de].min(), dp[de].min(), 0), max(dt[de].max(), dp[de].max(), 0)
-    c_.set(
-        yticks=pos,
-        yticklabels=genes[de],
-        xlim=(lo * 1.05, hi + 0.45 * (hi - lo)),
-        xlabel="Mean expression difference vs control",
-        title=f"C · Top-{N_DE} DE genes (mapped: {len(de)}) · {cond}",
+    fig, ax = plt.subplots(figsize=(5.2, 0.28 * len(de) + 1.2))
+    ax.barh(pos - 0.18, ex.dt[de], height=0.36, color=TEAL, label="Observed")
+    ax.barh(pos + 0.18, ex.dp[de], height=0.36, color=ORANGE, label="Predicted")
+    ax.axvline(0, lw=0.7, c="#666")
+    ax.set(yticks=pos, yticklabels=r.genes[de], xlabel=f"Δ under {ex.pert}")
+    ax.invert_yaxis()
+    ax.tick_params(axis="y", labelsize=8)
+    ax.grid(axis="y", visible=False)
+    ax.legend(
+        frameon=False,
+        ncol=2,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.1 * 20 / max(len(de), 1)),
     )
-    c_.invert_yaxis()
-    c_.legend(frameon=False, loc="lower right")
-    c_.tick_params(axis="y", labelsize=8)
+    return fig
 
-    d = ax[1, 0]  # single-cell distributions of the strongest DE gene
-    g = de[np.argmax(np.abs(dt[de]))]
+
+def fig_single_cell(r: PPResults, ex: Example, g: int):
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
     ctrl_rows = np.where(r.adata.obs["condition"].to_numpy() == CTRL)[0]
     ctrl_rows = np.random.default_rng(SEED).choice(
         ctrl_rows, size=min(2000, len(ctrl_rows)), replace=False
     )
-    ctrl_vals = np.asarray(
-        r.adata.X[ctrl_rows][:, [g]].todense()
-        if hasattr(r.adata.X, "todense")
-        else r.adata.X[ctrl_rows][:, [g]]
-    ).ravel()
+    Xc = r.adata.X[ctrl_rows][:, [g]]
+    ctrl_vals = np.asarray(Xc.todense() if hasattr(Xc, "todense") else Xc).ravel()
+    groups = [
+        "Control\n(observed)",
+        f"{ex.pert}\n(observed)",
+        f"{ex.pert}\n(predicted)",
+    ]
     vdf = pd.concat(
         [
-            pd.DataFrame({"group": "Control (observed)", "expr": ctrl_vals}),
-            pd.DataFrame({"group": f"{pert} (observed)", "expr": r.target[s, g]}),
-            pd.DataFrame({"group": f"{pert} (predicted)", "expr": r.pred[s, g]}),
+            pd.DataFrame({"group": groups[0], "expr": ctrl_vals}),
+            pd.DataFrame({"group": groups[1], "expr": r.target[ex.rows, g]}),
+            pd.DataFrame({"group": groups[2], "expr": r.pred[ex.rows, g]}),
         ]
     )
+    fig, ax = plt.subplots(figsize=(5, 4.5))
     sns.violinplot(
         data=vdf,
         x="group",
         y="expr",
         hue="group",
-        palette=["#b8c4ce", "#3387a4", "#e09a62"],
+        palette=["#b8c4ce", TEAL, ORANGE],
         inner="quart",
         cut=0,
-        ax=d,
+        ax=ax,
         legend=False,
     )
-    d.set(
-        xlabel=f"Cells (control: random {len(ctrl_rows):,}; perturbed: {s.sum():,})",
-        ylabel=f"{genes[g]} expression (log-normalized)",
-        title=f"D · Single-cell distribution · {genes[g]} under {cond}",
-    )
+    ax.set(xlabel="", ylabel=f"{r.genes[g]} expression (log-normalized)")
+    sd = vdf.groupby("group", sort=False).expr.std()
+    return fig, {
+        "control_cells_sampled": len(ctrl_rows),
+        "perturbed_cells": int(ex.rows.sum()),
+        "sd": dict(zip(["control", "observed", "predicted"], sd.to_numpy())),
+    }
 
-    e = ax[1, 1]  # per-condition Δ correlation vs baseline
+
+def fig_delta_correlation(pc: pd.DataFrame):
+    import matplotlib.pyplot as plt
+
     o = pc.sort_values("pearson_delta_mapped")
     y = np.arange(len(o))
-    e.barh(
+    fig, ax = plt.subplots(figsize=(6, 0.3 * len(o) + 1.5))
+    ax.barh(
         y - 0.2,
         o.pearson_delta_mapped,
         height=0.4,
-        color="#ab6b9d",
-        label="All mapped genes",
+        color=PURPLE,
+        label="DeepSC, all mapped genes",
     )
-    e.barh(
+    ax.barh(
         y + 0.2,
         o.pearson_de_delta_mapped,
         height=0.4,
-        color="#d4464c",
-        label=f"Top-{N_DE} DE (mapped)",
+        color=RED,
+        label=f"DeepSC, top-{N_DE} DE genes",
     )
-    e.scatter(
+    ax.scatter(
         o.pearson_delta_trainmean_baseline,
         y - 0.2,
         marker="|",
-        s=140,
+        s=120,
         c="k",
         lw=2,
         zorder=3,
         label="Train-mean-Δ baseline",
     )
-    e.scatter(
+    ax.scatter(
         o.pearson_de_delta_trainmean_baseline,
         y + 0.2,
         marker="|",
-        s=140,
+        s=120,
         c="k",
         lw=2,
         zorder=3,
     )
-    e.axvline(o.pearson_delta_mapped.mean(), ls="--", c="#ab6b9d", lw=1)
-    e.axvline(o.pearson_de_delta_mapped.mean(), ls="--", c="#d4464c", lw=1)
-    e.axvline(0, c="#666", lw=0.7)
-    e.set(
+    ax.axvline(0, c="#666", lw=0.7)
+    ax.set(
         yticks=y,
         yticklabels=o.gene,
-        xlabel="Pearson r of Δ (observed vs predicted)",
-        title=f"E · Δ correlation per perturbation · DeepSC {o.pearson_delta_mapped.mean():.3f} "
-        f"vs baseline {o.pearson_delta_trainmean_baseline.mean():.3f}",
+        xlabel="Pearson r between observed and predicted Δ",
+        xlim=(-1, 1.02),
     )
-    e.legend(frameon=False, loc="upper left", fontsize=8)
-    e.tick_params(axis="y", labelsize=8)
-
-    f = ax[1, 2]  # MSE vs control-mean baseline
-    o2 = pc.sort_values("mse_model")
-    y2 = np.arange(len(o2))
-    f.hlines(y2, o2.mse_model, o2.mse_control_mean, color="#c9d1d8", lw=2)
-    f.scatter(
-        o2.mse_control_mean,
-        y2,
-        color="#8a96a3",
-        label="Control-mean baseline",
-        zorder=3,
+    ax.tick_params(axis="y", labelsize=8)
+    ax.grid(axis="y", visible=False)
+    ax.legend(
+        frameon=False,
+        fontsize=8,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.07),
+        ncol=2,
     )
-    f.scatter(o2.mse_model, y2, color="#386fa4", label="DeepSC", zorder=3)
-    f.set(
-        yticks=y2,
-        yticklabels=o2.gene,
-        xlabel="Per-cell MSE over mapped genes",
-        title=f"F · MSE per perturbation · DeepSC lower in {(o2.mse_model < o2.mse_control_mean).sum()}/{len(o2)}",
+    return fig
+
+
+def fig_mse(pc: pd.DataFrame):
+    import matplotlib.pyplot as plt
+
+    o = pc.sort_values("mse_model")
+    y = np.arange(len(o))
+    fig, ax = plt.subplots(figsize=(5.5, 0.3 * len(o) + 1.5))
+    ax.hlines(y, o.mse_model, o.mse_control_mean, color="#c9d1d8", lw=2)
+    ax.scatter(
+        o.mse_control_mean, y, color=GRAY, label="Control-mean baseline", zorder=3
     )
-    f.legend(frameon=False, loc="lower right", fontsize=8)
-    f.tick_params(axis="y", labelsize=8)
+    ax.scatter(o.mse_model, y, color=BLUE, label="DeepSC", zorder=3)
+    ax.set(yticks=y, yticklabels=o.gene, xlabel="Per-cell MSE (mapped genes)")
+    ax.tick_params(axis="y", labelsize=8)
+    ax.grid(axis="y", visible=False)
+    ax.legend(
+        frameon=False,
+        fontsize=8,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.07),
+        ncol=2,
+    )
+    return fig
 
-    savefig(fig, path, dpi=165)
-    return {"condition": cond, "r_abs": r_abs, "r_delta": r_d, "violin_gene": genes[g]}
+
+def heatmap_genes(r: PPResults, m: Means, order, per_cond: int = 3) -> list[int]:
+    return list(
+        dict.fromkeys(i for c in order for i in m.de[c][r.mapped[m.de[c]]][:per_cond])
+    )
 
 
-def plot_heatmap(
-    r: PPResults, m: Means, pc: pd.DataFrame, path: Path, per_cond: int = 3
-) -> dict:
+def fig_delta_heatmap(r: PPResults, m: Means, pc: pd.DataFrame, order, sel):
     import matplotlib.pyplot as plt
     import seaborn as sns
 
-    mk = r.mapped
-    order = pc.sort_values("pearson_delta_mapped", ascending=False).index
-    sel = list(dict.fromkeys(i for c in order for i in m.de[c][mk[m.de[c]]][:per_cond]))
     obs = np.array([(m.target[c] - m.ctrl)[sel] for c in order])
     pred = np.array([(m.pred[c] - m.ctrl)[sel] for c in order])
-    sim_obs = mean_pairwise_r(np.array([(m.target[c] - m.ctrl)[mk] for c in order]))
-    sim_pred = mean_pairwise_r(np.array([(m.pred[c] - m.ctrl)[mk] for c in order]))
     lim = np.abs(np.r_[obs.ravel(), pred.ravel()]).max()
     ylab = [
         f"{c.split('+')[0]} (r={pc.loc[c, 'pearson_delta_mapped']:.2f})" for c in order
     ]
     fig, ax = plt.subplots(
-        2, 1, figsize=(max(14, 0.3 * len(sel) + 4), 13), layout="constrained"
+        2, 1, figsize=(max(10, 0.26 * len(sel) + 3), 11), layout="constrained"
     )
-    for a, mat, title in zip(
-        ax, [obs, pred], ["A · Observed Δ", "B · Predicted Δ (DeepSC)"]
-    ):
+    for a, mat, name in zip(ax, [obs, pred], ["Observed", "Predicted (DeepSC)"]):
         sns.heatmap(
             mat,
             cmap="RdBu_r",
@@ -454,66 +551,76 @@ def plot_heatmap(
             xticklabels=r.genes[sel],
             yticklabels=ylab,
             ax=a,
-            cbar_kws={"label": "Δ mean expression vs control"},
+            cbar_kws={"label": "Δ"},
         )
-        a.set_title(title, loc="left", fontsize=13)
+        a.set_ylabel(name, fontsize=11, weight="bold")
         a.tick_params(axis="x", labelsize=7, rotation=90)
         a.tick_params(axis="y", labelsize=8, rotation=0)
-    fig.suptitle(
-        f"Test perturbations × top-{per_cond} DE genes each (mapped, {len(sel)} genes) · rows sorted by Δ "
-        f"correlation\nMean pairwise r between perturbations (all mapped genes): observed {sim_obs:.3f} · "
-        f"predicted {sim_pred:.3f}",
-        fontsize=14,
-        weight="bold",
-    )
-    savefig(fig, path, dpi=150)
-    return {"pairwise_r_observed": sim_obs, "pairwise_r_predicted": sim_pred}
+    return fig
 
 
-def plot_history(status: dict, title: str, path: Path) -> Path:
+def fig_history(status: dict, which: str):
     import matplotlib.pyplot as plt
 
     h, best = status["history"], status["best_epoch"]
     ep = [x["epoch"] for x in h]
-    fig, ax = plt.subplots(1, 2, figsize=(12, 4.2), layout="constrained")
-    ax[0].plot(ep, [x["train_mse"] for x in h], "o-", label="Train MSE")
-    ax[0].plot(ep, [x["val"]["mse"] for x in h], "o-", label="Validation MSE")
-    ax[0].plot(
-        ep,
-        [x["val"]["control_baseline_mse"] for x in h],
-        "--",
-        c="#888",
-        label="Validation control-input baseline",
+    fig, ax = plt.subplots(figsize=(5.5, 3.8))
+    if which == "loss":
+        ax.plot(ep, [x["train_mse"] for x in h], "o-", label="Training MSE")
+        ax.plot(ep, [x["val"]["mse"] for x in h], "o-", label="Validation MSE")
+        ax.plot(
+            ep,
+            [x["val"]["control_baseline_mse"] for x in h],
+            "--",
+            c="#888",
+            label="Validation, control-input baseline",
+        )
+        ax.set_ylabel("MSE")
+    else:
+        ax.plot(ep, [x["val"]["pearson_delta"] for x in h], "o-", label="Pearson Δ")
+        ax.plot(
+            ep,
+            [x["val"]["pearson_de_delta"] for x in h],
+            "o-",
+            label=f"Pearson Δ (top-{N_DE} DE)",
+        )
+        ax.set_ylabel("Validation Pearson r (as logged)")
+    ax.axvline(
+        best, ls=":", c="#555", lw=1, label=f"Selected checkpoint (epoch {best})"
     )
-    for k, lab in [
-        ("pearson_delta", "Pearson Δ"),
-        ("pearson_de_delta", "Pearson Δ (DE)"),
-    ]:
-        ax[1].plot(ep, [x["val"][k] for x in h], "o-", label=lab)
-    for a in ax:
-        a.axvline(best, ls="--", c="#888", lw=1)
-        a.set(xlabel="Epoch", xticks=ep)
-        a.grid(alpha=0.25)
-    ax[0].legend(frameon=False, fontsize=9, loc="center right")
-    ax[1].legend(frameon=False, fontsize=9, loc="lower right")
-    ax[0].set(ylabel="MSE", title="A · Loss")
-    ax[1].set(ylabel="Pearson r")
-    ax[1].set_title(
-        f"B · Validation Δ correlation (best = epoch {best}; as logged, incl. unmapped genes)",
-        fontsize=10,
-    )
-    fig.suptitle(title, fontsize=14, weight="bold")
-    return savefig(fig, path, dpi=160)
+    ax.set(xlabel="Epoch", xticks=ep)
+    ax.legend(frameon=False, fontsize=8)
+    return fig
 
 
-# ---------------------------------------------------------------------------- CLI
+# ----------------------------------------------------------------------- pipeline
+
+
+def target_knockdown(r: PPResults, m: Means) -> pd.DataFrame:
+    """Observed and predicted Δ of each perturbation's own target gene (mapped targets only)."""
+    gid = {g: i for i, g in enumerate(r.genes)}
+    rows = []
+    for c in r.conditions:
+        g = gid.get(c.split("+")[0])
+        if g is not None and r.mapped[g]:
+            rows.append(
+                {
+                    "condition": c,
+                    "observed": m.target[c][g] - m.ctrl[g],
+                    "predicted": m.pred[c][g] - m.ctrl[g],
+                }
+            )
+    return (
+        pd.DataFrame(rows).set_index("condition")
+        if rows
+        else pd.DataFrame(columns=["observed", "predicted"])
+    )
 
 
 def run(
     run_dir: Path, h5ad: Path, split: Path, out: Path, dataset_label: str = "Adamson"
-) -> dict:
-    """Verify, then write all PP figures and tables to ``out``. Returns a summary dict."""
-    out.mkdir(parents=True, exist_ok=True)
+) -> FigureWriter:
+    """Verify, then write all PP figures, metadata and tables. Returns the writer."""
     r = load(run_dir, h5ad, split)
     m = compute_means(r)
     print("Verification:")
@@ -522,21 +629,259 @@ def run(
     checks.require()
 
     pc = per_condition_metrics(r, m)
-    pc.round(5).to_csv(out / "pp_per_condition_metrics.csv")
-    example = plot_overview(r, m, pc, out / "pp_prediction_comparison.png")
-    similarity = plot_heatmap(r, m, pc, out / "pp_delta_heatmap.png")
-    plot_history(
-        r.status,
-        f"PP fine-tuning history · {dataset_label}",
-        out / "pp_training_history.png",
+    ex = pick_example(r, m, pc)
+    order = pc.sort_values("pearson_delta_mapped", ascending=False).index
+    mk = r.mapped
+    sim_obs = mean_pairwise_r(np.array([(m.target[c] - m.ctrl)[mk] for c in order]))
+    sim_pred = mean_pairwise_r(np.array([(m.pred[c] - m.ctrl)[mk] for c in order]))
+    kd = target_knockdown(r, m)
+
+    apply_style()
+    ds, n_cond, n_cells, n_mapped = dataset_label, len(pc), len(r.cond), int(mk.sum())
+    w = FigureWriter(
+        out,
+        "pp",
+        ds,
+        ds,
+        {
+            "predictions": run_dir / "test_predictions.npz",
+            "run_record": run_dir / "status.json",
+            "h5ad": h5ad,
+            "split": split,
+        },
     )
-    return {
-        "recorded": r.status["test"],
-        "per_condition": pc,
-        "n_train": len(r.train_conditions),
-        "example": example,
-        **similarity,
+    note = METRIC_NOTE.format(n_mapped=n_mapped)
+    setting = (
+        f"{ds} test set: {n_cond} perturbations not seen during training ({n_cells:,} cells), "
+        f"{len(r.train_conditions)} training perturbations"
+    )
+    model_r, base_r = (
+        pc.pearson_delta_mapped.mean(),
+        pc.pearson_delta_trainmean_baseline.mean(),
+    )
+    model_de, base_de = (
+        pc.pearson_de_delta_mapped.mean(),
+        pc.pearson_de_delta_trainmean_baseline.mean(),
+    )
+    better = int((pc.pearson_delta_mapped > pc.pearson_delta_trainmean_baseline).sum())
+    better_de = int(
+        (pc.pearson_de_delta_mapped > pc.pearson_de_delta_trainmean_baseline).sum()
+    )
+    negative = list(pc.gene[pc.pearson_delta_mapped < 0])
+    rec = r.status["test"]
+    summary = {
+        "conditions": n_cond,
+        "cells": n_cells,
+        "mapped_genes": n_mapped,
+        "pearson_delta_recorded": rec["pearson_delta"],
+        "pearson_de_delta_recorded": rec["pearson_de_delta"],
+        "pearson_delta_mapped": model_r,
+        "pearson_de_delta_mapped": model_de,
+        "pearson_delta_trainmean_baseline": base_r,
+        "pearson_de_delta_trainmean_baseline": base_de,
+        "conditions_better_than_baseline": better,
+        "conditions_better_than_baseline_de": better_de,
+        "pairwise_r_observed": sim_obs,
+        "pairwise_r_predicted": sim_pred,
+        "example_condition": ex.cond,
     }
+    ex_note = (
+        f"{ex.pert} is shown as a representative perturbation: its Δ correlation is the median of the "
+        f"{n_cond} test perturbations."
+    )
+
+    # Example perturbation -------------------------------------------------------
+    w.save(
+        fig_absolute(r, ex),
+        "example_absolute_expression",
+        title=f"Observed vs predicted mean expression, {ex.pert} ({ds})",
+        caption_short=f"Mean expression under {ex.pert}: observed vs predicted.",
+        caption_long=f"Each dot is one gene: mean expression of the {ex.rows.sum()} {ex.pert} test cells "
+        f"(observed) against the mean DeepSC prediction for the same cells; red: top-{N_DE} DE genes. "
+        f"Dashed line: y = x. Pearson r = {ex.r_abs:.3f}. {ex_note} Only the {n_mapped:,} genes in "
+        f"the DeepSC vocabulary are used.",
+        description=f"The high correlation (r = {ex.r_abs:.3f}) mostly reflects that the model reproduces each "
+        f"gene's baseline expression level, which a prediction of the unperturbed control would also "
+        f"do. It is therefore not evidence that the perturbation effect is captured; the Δ-based "
+        f"panels test that.",
+        metrics={"condition": ex.cond, "pearson_r": ex.r_abs},
+    )
+    slope = float(np.polyfit(ex.dt[ex.de], ex.dp[ex.de], 1)[0])
+    sign_ok = float(np.mean(np.sign(ex.dp[ex.de]) == np.sign(ex.dt[ex.de])))
+    w.save(
+        fig_delta_scatter(r, ex),
+        "example_delta_scatter",
+        title=f"Observed vs predicted perturbation effect, {ex.pert} ({ds})",
+        caption_short=f"Expression change under {ex.pert}: observed vs predicted.",
+        caption_long=f"Each dot is one gene: observed Δ against predicted Δ for {ex.pert}; red: top-{N_DE} DE "
+        f"genes, the six largest labeled. Dashed line: y = x. Pearson r = {ex.r_delta:.3f}. {note}",
+        description=f"Removing the control baseline isolates the perturbation effect. For {ex.pert} the "
+        f"predicted direction matches the observed one for {sign_ok:.0%} of the top DE genes; the "
+        f"least-squares slope of predicted on observed Δ over these genes is {slope:.2f} "
+        f"({'effects are underestimated' if slope < 0.9 else 'effect sizes are about right' if slope <= 1.1 else 'effects are overestimated'}).",
+        metrics={
+            "condition": ex.cond,
+            "pearson_r_delta": ex.r_delta,
+            "de_sign_agreement": sign_ok,
+            "de_slope": slope,
+        },
+    )
+    w.save(
+        fig_top_de(r, ex),
+        "example_top_de_genes",
+        title=f"Top differentially expressed genes under {ex.pert} ({ds})",
+        caption_short=f"Observed and predicted Δ of the top DE genes under {ex.pert}.",
+        caption_long=f"Observed (teal) and predicted (orange) Δ for the top-{N_DE} DE genes of {ex.pert} "
+        f"(ranked by the dataset's differential expression test; {len(ex.de)} of them are in the "
+        f"DeepSC vocabulary). {note}",
+        description=f"Bars of the same sign indicate a correctly predicted direction ({sign_ok:.0%} of genes). "
+        f"Bar length compares effect sizes; the slope of predicted on observed Δ is {slope:.2f}.",
+        metrics={
+            "condition": ex.cond,
+            "genes": list(r.genes[ex.de]),
+            "observed": ex.dt[ex.de],
+            "predicted": ex.dp[ex.de],
+        },
+    )
+    g = int(ex.de[np.argmax(np.abs(ex.dt[ex.de]))])
+    fig, sc_stats = fig_single_cell(r, ex, g)
+    sd = sc_stats["sd"]
+    w.save(
+        fig,
+        "example_single_cell_distribution",
+        title=f"Single-cell distribution of {r.genes[g]} under {ex.pert} ({ds})",
+        caption_short=f"Per-cell {r.genes[g]} expression: control, observed and predicted under {ex.pert}.",
+        caption_long=f"Violin plots of log-normalized {r.genes[g]} expression (the top DE gene of {ex.pert} with "
+        f"the largest |Δ|) in {sc_stats['control_cells_sampled']:,} randomly sampled control cells, "
+        f"the {sc_stats['perturbed_cells']} observed {ex.pert} cells and the DeepSC predictions for "
+        f"those cells. Dashed lines: quartiles.",
+        description=f"Beyond the mean, the spread of the predictions shows whether cell-to-cell variability is "
+        f"captured. The standard deviation of the predicted values is {sd['predicted']:.3f}, "
+        f"compared with {sd['observed']:.3f} in the observed perturbed cells"
+        + (
+            " — the predictions collapse to nearly a single value per gene, i.e. the model predicts "
+            "the mean response only."
+            if sd["predicted"] < 0.25 * sd["observed"]
+            else "."
+        ),
+        metrics={"condition": ex.cond, "gene": r.genes[g], **sc_stats},
+    )
+
+    # All perturbations ----------------------------------------------------------
+    w.save(
+        fig_delta_correlation(pc),
+        "delta_correlation_per_perturbation",
+        title=f"Per-perturbation effect correlation vs baseline ({ds})",
+        caption_short=f"Δ correlation for each unseen {ds} perturbation, DeepSC vs a train-mean baseline.",
+        caption_long=f"For each test perturbation, Pearson r between observed and predicted Δ over all mapped "
+        f"genes (purple) and over the top-{N_DE} DE genes (red). Black ticks: baseline that predicts, "
+        f"for every test perturbation, the mean Δ of the {len(r.train_conditions)} training "
+        f"perturbations. {setting}. {note}",
+        description=f"Mean Δ correlation over all mapped genes is {model_r:.3f} for DeepSC and {base_r:.3f} for "
+        f"the baseline (DeepSC higher for {better}/{n_cond} perturbations); over the top DE genes "
+        f"{model_de:.3f} vs {base_de:.3f} ({better_de}/{n_cond}). "
+        + (
+            f"Predictions are anti-correlated with the observed response for {_fmt_list(negative)}. "
+            if negative
+            else ""
+        )
+        + f"The run's recorded Pearson Δ ({rec['pearson_delta']:.3f}) is higher because it also "
+        f"counts {int((~mk).sum())} unmapped genes whose predictions and targets were both set to 0, "
+        f"which agree trivially.",
+        metrics=summary,
+    )
+    worse = list(pc.gene[pc.mse_model >= pc.mse_control_mean])
+    w.save(
+        fig_mse(pc),
+        "mse_per_perturbation",
+        title=f"Per-perturbation prediction error vs control-mean baseline ({ds})",
+        caption_short=f"Per-cell MSE for each unseen {ds} perturbation, DeepSC vs control mean.",
+        caption_long=f"Mean squared error between predicted and observed expression per cell, averaged over the "
+        f"cells of each test perturbation (blue), compared with predicting the mean control profile "
+        f"for every cell (gray). {setting}. Only the {n_mapped:,} mapped genes are used.",
+        description=f"DeepSC has the lower error for {n_cond - len(worse)}/{n_cond} perturbations, mean "
+        f"{pc.mse_model.mean():.4f} vs {pc.mse_control_mean.mean():.4f}. The margin is small relative "
+        f"to the error itself because most genes change little under any perturbation."
+        + (
+            f" DeepSC is worse than the control mean for {_fmt_list(worse)}."
+            if worse
+            else ""
+        ),
+        metrics={
+            "mse_model_mean": pc.mse_model.mean(),
+            "mse_control_mean_mean": pc.mse_control_mean.mean(),
+            "worse_than_control": worse,
+        },
+    )
+    sel = heatmap_genes(r, m, order)
+    kd_ok = int(((kd.observed < 0) & (kd.predicted < 0)).sum()) if len(kd) else 0
+    w.save(
+        fig_delta_heatmap(r, m, pc, order, sel),
+        "delta_heatmap",
+        title=f"Observed and predicted responses across perturbations ({ds})",
+        caption_short=f"Observed (top) and predicted (bottom) Δ for all unseen {ds} perturbations.",
+        caption_long=f"Rows: test perturbations, sorted by Δ correlation (in parentheses); columns: the top-3 "
+        f"mapped DE genes of each perturbation ({len(sel)} genes). Both heatmaps share one color "
+        f"scale. {note}",
+        description=f"Observed responses differ between perturbations (mean pairwise r of Δ profiles over all "
+        f"mapped genes {sim_obs:.3f}), whereas predicted responses are "
+        f"{'nearly identical' if sim_pred > 0.9 else 'similar' if sim_pred > 0.7 else 'distinct'} "
+        f"(mean pairwise r {sim_pred:.3f}). "
+        + (
+            f"The knock-down of the perturbed gene itself is predicted for {kd_ok}/{len(kd)} "
+            f"perturbations whose target is in the vocabulary. "
+            if len(kd)
+            else ""
+        )
+        + (
+            "Apart from that, the model mostly predicts one shared response, which is why perturbations "
+            "with an atypical response score poorly."
+            if sim_pred > 0.9
+            else ""
+        ),
+        metrics={
+            "pairwise_r_observed": sim_obs,
+            "pairwise_r_predicted": sim_pred,
+            "genes": list(r.genes[sel]),
+            "target_knockdown": kd.round(4).to_dict(orient="index"),
+        },
+    )
+
+    # Training -------------------------------------------------------------------
+    h, best = r.status["history"], r.status["best_epoch"]
+    bv = next(x["val"] for x in h if x["epoch"] == best)
+    w.save(
+        fig_history(r.status, "loss"),
+        "training_loss",
+        title=f"PP fine-tuning loss ({ds})",
+        caption_short=f"Training and validation MSE during PP fine-tuning on {ds}.",
+        caption_long=f"Per-epoch MSE on the training and validation sets; dashed: validation error of the "
+        f"control-input baseline as logged by the run. Dotted line: selected checkpoint (epoch {best}, "
+        f"highest validation Pearson Δ). Training stopped after epoch {h[-1]['epoch']}.",
+        description=f"Validation MSE stays within {min(x['val']['mse'] for x in h):.4f}–"
+        f"{max(x['val']['mse'] for x in h):.4f} over all epochs while training MSE falls from "
+        f"{h[0]['train_mse']:.4f} to {h[-1]['train_mse']:.4f}.",
+        metrics={"history": h, "best_epoch": best},
+    )
+    w.save(
+        fig_history(r.status, "val"),
+        "training_validation_delta",
+        title=f"PP validation Δ correlation during fine-tuning ({ds})",
+        caption_short=f"Validation Pearson Δ during PP fine-tuning on {ds}.",
+        caption_long=f"Pearson Δ over all genes and over the top-{N_DE} DE genes on the validation perturbations "
+        f"after each epoch, as logged by the run (unmapped genes included, see main text). Dotted "
+        f"line: selected checkpoint (epoch {best}).",
+        description=f"The selected epoch has validation Pearson Δ {bv['pearson_delta']:.3f} (DE "
+        f"{bv['pearson_de_delta']:.3f}). The logged values include unmapped genes and are therefore "
+        f"higher than the mapped-gene test values reported in the other figures.",
+        metrics={"history": h, "best_epoch": best},
+    )
+
+    w.table(pc.round(5), "per_condition_metrics")
+    if len(kd):
+        w.table(kd.round(5), "target_knockdown")
+    w.finalize(checks, summary=summary)
+    return w
 
 
 def main(argv=None) -> None:
@@ -553,35 +898,24 @@ def main(argv=None) -> None:
     p.add_argument(
         "--split", type=Path, default=DEFAULT_SPLIT, help="GEARS split pickle"
     )
-    p.add_argument("--out", type=Path, default=Path("viz_outputs/pp"))
+    p.add_argument(
+        "--out", type=Path, default=Path("viz_outputs"), help="root output dir"
+    )
     p.add_argument("--dataset-label", default="Adamson")
     args = p.parse_args(argv)
     use_headless_backend()
-    s = run(args.run_dir, args.h5ad, args.split, args.out, args.dataset_label)
-
-    pc, t = s["per_condition"], s["recorded"]
-    better = (pc.pearson_delta_mapped > pc.pearson_delta_trainmean_baseline).sum()
+    w = run(args.run_dir, args.h5ad, args.split, args.out, args.dataset_label)
+    s = json.loads((w.root / "manifest.json").read_text())["summary"]
     print(f"\n{'metric':<24}{'recorded':>10}{'mapped':>10}{'baseline':>10}")
     print(
-        f"{'Pearson Δ':<24}{t['pearson_delta']:>10.4f}{pc.pearson_delta_mapped.mean():>10.4f}"
-        f"{pc.pearson_delta_trainmean_baseline.mean():>10.4f}"
+        f"{'Pearson Δ':<24}{s['pearson_delta_recorded']:>10.4f}{s['pearson_delta_mapped']:>10.4f}"
+        f"{s['pearson_delta_trainmean_baseline']:>10.4f}"
     )
     print(
-        f"{'Pearson Δ (top-20 DE)':<24}{t['pearson_de_delta']:>10.4f}{pc.pearson_de_delta_mapped.mean():>10.4f}"
-        f"{pc.pearson_de_delta_trainmean_baseline.mean():>10.4f}"
+        f"{'Pearson Δ (top-20 DE)':<24}{s['pearson_de_delta_recorded']:>10.4f}{s['pearson_de_delta_mapped']:>10.4f}"
+        f"{s['pearson_de_delta_trainmean_baseline']:>10.4f}"
     )
-    print(
-        f"Baseline = mean Δ of {s['n_train']} training perturbations; DeepSC better in {better}/{len(pc)}."
-    )
-    print(
-        f"Mean pairwise r of Δ between perturbations: observed {s['pairwise_r_observed']:.3f}, "
-        f"predicted {s['pairwise_r_predicted']:.3f}"
-    )
-    ex = s["example"]
-    print(
-        f"Example (median Δ r): {ex['condition']} | absolute r={ex['r_abs']:.3f}, Δ r={ex['r_delta']:.3f}"
-    )
-    print("Saved to", args.out.resolve())
+    print(f"Saved {len(w.records)} figures to {w.root.resolve()}")
 
 
 if __name__ == "__main__":
