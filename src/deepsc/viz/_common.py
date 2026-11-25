@@ -25,6 +25,9 @@ from datetime import datetime, timezone
 
 # Results of the 2026-11-20 downstream validation run on server warhol.
 DOWNSTREAM_RUN_ROOT = Path("/DATA2/DeepSC/results/downstream_20261120")
+REPO_ROOT = Path(__file__).resolve().parents[3]
+DATASET_CONFIG_ROOT = REPO_ROOT / "configs" / "datasets"
+DEFAULT_OUT = Path("outputs") / "viz"
 FORMATS = ("pdf", "png")
 PNG_DPI = 300
 
@@ -70,6 +73,26 @@ def spread_labels(y: np.ndarray, gap: float) -> np.ndarray:
     for i in range(1, len(y)):
         y[i] = max(y[i], y[i - 1] + gap)
     return y
+
+
+def load_dataset_config(task: str, dataset: str | Path) -> dict:
+    """Load ``configs/datasets/<task>/<dataset>.yaml`` (or an explicit YAML path)."""
+    import yaml
+
+    path = Path(dataset)
+    if path.suffix not in (".yaml", ".yml"):
+        path = DATASET_CONFIG_ROOT / task / f"{dataset}.yaml"
+    if not path.exists():
+        available = sorted(p.stem for p in (DATASET_CONFIG_ROOT / task).glob("*.yaml"))
+        raise FileNotFoundError(
+            f"No dataset config {path}; available for {task}: {available}"
+        )
+    with open(path) as f:
+        cfg = yaml.safe_load(f)
+    if cfg.get("task") != task:
+        raise ValueError(f"{path} is a {cfg.get('task')!r} config, expected {task!r}")
+    cfg["_path"] = str(path)
+    return cfg
 
 
 def slug(text: str) -> str:

@@ -1,8 +1,8 @@
 """Perturbation prediction (PP) figures from saved DeepSC test predictions.
 
 Usage:
-    python -m deepsc.viz.perturbation [--run-dir DIR] [--h5ad FILE] [--split PKL] [--out DIR]
-                                      [--dataset-label Adamson]
+    python -m deepsc.viz.perturbation [--run-dir DIR] [--dataset adamson|PATH.yaml]
+                                      [--h5ad FILE] [--split PKL] [--out DIR]
 
 Inputs:
   * ``<run-dir>/test_predictions.npz``: per test cell ``predictions`` and ``targets``
@@ -11,7 +11,9 @@ Inputs:
   * the GEARS ``perturb_processed.h5ad`` (control cells, ``uns[rank_genes_groups_cov_all]``);
   * the GEARS split pickle (training perturbations, for the train-mean baseline).
 
-Writes ``<out>/pp/<dataset>/`` (see :mod:`deepsc.viz._common` for the layout):
+Data paths come from ``configs/datasets/pp/<dataset>.yaml``.
+
+Writes ``<out>/pp/<dataset>/`` (default ``outputs/viz/pp/<dataset>/``; see :mod:`deepsc.viz._common` for the layout):
 one untitled figure per panel, each with a ``.json`` sidecar holding its title,
 short and long caption and a text description.
 
@@ -37,18 +39,17 @@ from scipy.stats import pearsonr
 
 import argparse
 from deepsc.viz._common import (
+    DEFAULT_OUT,
     DOWNSTREAM_RUN_ROOT,
     Checks,
     FigureWriter,
     apply_style,
+    load_dataset_config,
     read_status,
     use_headless_backend,
 )
 
 DEFAULT_RUN_DIR = DOWNSTREAM_RUN_ROOT / "pp_adamson_1215"
-DEFAULT_DATA_DIR = Path("/DATA2/DeepSC/adamson")
-DEFAULT_H5AD = DEFAULT_DATA_DIR / "perturb_processed.h5ad"
-DEFAULT_SPLIT = DEFAULT_DATA_DIR / "splits/adamson_simulation_1_0.75.pkl"
 CTRL = "ctrl"
 N_DE = 20
 SEED = 0
@@ -86,9 +87,9 @@ class Means:
 
 
 def load(
-    run_dir: Path = DEFAULT_RUN_DIR,
-    h5ad: Path = DEFAULT_H5AD,
-    split: Path = DEFAULT_SPLIT,
+    run_dir: Path,
+    h5ad: Path,
+    split: Path,
 ) -> PPResults:
     z = np.load(Path(run_dir) / "test_predictions.npz")
     with open(split, "rb") as f:
@@ -618,9 +619,20 @@ def target_knockdown(r: PPResults, m: Means) -> pd.DataFrame:
 
 
 def run(
-    run_dir: Path, h5ad: Path, split: Path, out: Path, dataset_label: str = "Adamson"
+    run_dir: Path,
+    out: Path,
+    dataset: dict,
+    h5ad: Path | None = None,
+    split: Path | None = None,
 ) -> FigureWriter:
-    """Verify, then write all PP figures, metadata and tables. Returns the writer."""
+    """Verify, then write all PP figures, metadata and tables. Returns the writer.
+
+    ``dataset`` is a dataset config (see ``configs/datasets/pp/``); ``h5ad`` and
+    ``split`` override its ``data.h5ad`` and ``data.split`` paths.
+    """
+    h5ad = Path(h5ad or dataset["data"]["h5ad"])
+    split = Path(split or dataset["data"]["split"])
+    dataset_label = dataset.get("label", dataset["name"])
     r = load(run_dir, h5ad, split)
     m = compute_means(r)
     print("Verification:")
@@ -641,13 +653,14 @@ def run(
     w = FigureWriter(
         out,
         "pp",
-        ds,
+        dataset["name"],
         ds,
         {
             "predictions": run_dir / "test_predictions.npz",
             "run_record": run_dir / "status.json",
             "h5ad": h5ad,
             "split": split,
+            "dataset_config": dataset["_path"],
         },
     )
     note = METRIC_NOTE.format(n_mapped=n_mapped)
@@ -893,18 +906,26 @@ def main(argv=None) -> None:
         help="dir with test_predictions.npz, status.json",
     )
     p.add_argument(
-        "--h5ad", type=Path, default=DEFAULT_H5AD, help="GEARS perturb_processed.h5ad"
+        "--dataset",
+        default="adamson",
+        help="dataset config name in configs/datasets/pp/ or a YAML path",
     )
     p.add_argument(
-        "--split", type=Path, default=DEFAULT_SPLIT, help="GEARS split pickle"
+        "--h5ad", type=Path, help="override the h5ad from the dataset config"
     )
     p.add_argument(
-        "--out", type=Path, default=Path("viz_outputs"), help="root output dir"
+        "--split", type=Path, help="override the split pickle from the dataset config"
     )
-    p.add_argument("--dataset-label", default="Adamson")
+    p.add_argument(
+        "--out",
+        type=Path,
+        default=DEFAULT_OUT,
+        help="root output dir; figures go to <out>/pp/<dataset>/",
+    )
     args = p.parse_args(argv)
     use_headless_backend()
-    w = run(args.run_dir, args.h5ad, args.split, args.out, args.dataset_label)
+    cfg = load_dataset_config("pp", args.dataset)
+    w = run(args.run_dir, args.out, cfg, args.h5ad, args.split)
     s = json.loads((w.root / "manifest.json").read_text())["summary"]
     print(f"\n{'metric':<24}{'recorded':>10}{'mapped':>10}{'baseline':>10}")
     print(

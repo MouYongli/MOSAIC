@@ -1,26 +1,26 @@
 """Cell type annotation (CTA) figures from saved DeepSC test predictions.
 
 Usage:
-    python -m deepsc.viz.cta [--run-dir DIR] [--h5ad FILE] [--out DIR]
-                             [--dataset-label Zheng] [--class-names JSON]
+    python -m deepsc.viz.cta [--run-dir DIR] [--dataset zheng|PATH.yaml] [--h5ad FILE] [--out DIR]
 
 Inputs:
   * ``<run-dir>/test_predictions.npz``: ``logits``, ``labels``, ``cell_ids``,
     ``classes`` and ``confusion_matrix`` for every test cell;
   * ``<run-dir>/status.json``: run record with test metrics and epoch history;
-  * the test ``.h5ad`` the predictions were made on (raw counts, ``obs[celltype]``).
+  * the dataset config ``configs/datasets/cta/<dataset>.yaml``: test h5ad path,
+    label column and the code -> cell type name mapping (``classes``).
 
-Writes ``<out>/cta/<dataset>/`` (see :mod:`deepsc.viz._common` for the layout):
-one untitled figure per panel, each with a ``.json`` sidecar holding its title,
-short and long caption and a text description.
+Writes ``<out>/cta/<dataset>/`` (default ``outputs/viz/cta/<dataset>/``; see
+:mod:`deepsc.viz._common` for the layout): one untitled figure per panel, each
+with a ``.json`` sidecar holding its title, short and long caption and a text
+description.
 
 The UMAP is computed from the test cells' expression (TP10K, log1p, 2,000 HVGs,
 50 PCs); it is a display layout, not a model embedding. Class codes are shown as
-``Type <code>`` unless ``--class-names`` maps codes to names.
+``Type <code>`` when the dataset config has no ``classes`` mapping.
 """
 
 from __future__ import annotations
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,17 +36,18 @@ from sklearn.metrics import (
 
 import argparse
 from deepsc.viz._common import (
+    DEFAULT_OUT,
     DOWNSTREAM_RUN_ROOT,
     Checks,
     FigureWriter,
     apply_style,
+    load_dataset_config,
     read_status,
     spread_labels,
     use_headless_backend,
 )
 
 DEFAULT_RUN_DIR = DOWNSTREAM_RUN_ROOT / "cta_zheng_1215"
-DEFAULT_H5AD = Path("/DATA2/DeepSC/cell_type_annotation/zheng_test.h5ad")
 CELLTYPE_COL = "celltype"
 SEED = 0
 UMAP_METHOD = (
@@ -72,7 +73,7 @@ class CTAResults:
         return self.logits.argmax(1)
 
 
-def load(run_dir: Path = DEFAULT_RUN_DIR, h5ad: Path = DEFAULT_H5AD) -> CTAResults:
+def load(run_dir: Path, h5ad: Path) -> CTAResults:
     z = np.load(Path(run_dir) / "test_predictions.npz")
     return CTAResults(
         classes=z["classes"],
@@ -319,7 +320,7 @@ def fig_confusion(mat, order, normalized: bool):
             **kw,
         )
     ax.set(xlabel="Predicted", ylabel="Ground truth")
-    ax.tick_params(axis="x", labelrotation=45)
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
     ax.tick_params(axis="y", labelrotation=0)
     return fig
 
@@ -464,17 +465,36 @@ def fig_history(status: dict, which: str):
 # ----------------------------------------------------------------------- pipeline
 
 
+def class_names_from_config(cfg: dict) -> tuple[dict[str, str], dict[str, str]]:
+    """(code -> short display name, short -> full name) from a dataset config's ``classes``."""
+    classes = cfg.get("classes") or {}
+    short = {str(code): c.get("short") or c["name"] for code, c in classes.items()}
+    full = {short[str(code)]: c["name"] for code, c in classes.items()}
+    return short, full
+
+
 def run(
     run_dir: Path,
-    h5ad: Path,
     out: Path,
-    class_names: dict[str, str] | None = None,
-    dataset_label: str = "Zheng",
+    dataset: dict,
+    h5ad: Path | None = None,
 ) -> FigureWriter:
-    """Verify, then write all CTA figures, metadata and tables. Returns the writer."""
+    """Verify, then write all CTA figures, metadata and tables. Returns the writer.
+
+    ``dataset`` is a dataset config (see ``configs/datasets/cta/``); ``h5ad``
+    overrides its ``data.test`` path.
+    """
+    h5ad = Path(h5ad or dataset["data"]["test"])
+    class_names, full_names = class_names_from_config(dataset)
+    dataset_label = dataset.get("label", dataset["name"])
     r = load(run_dir, h5ad)
     print("Verification:")
-    checks = verify(r)
+    checks = verify(r, dataset.get("celltype_col", CELLTYPE_COL))
+    if class_names:
+        checks.add(
+            "dataset config names every class code",
+            set(map(str, r.classes)) <= set(class_names),
+        )
     checks.report()
     checks.require()
 
@@ -495,12 +515,13 @@ def run(
     w = FigureWriter(
         out,
         "cta",
-        dataset_label,
+        dataset["name"],
         dataset_label,
         {
             "predictions": run_dir / "test_predictions.npz",
             "run_record": run_dir / "status.json",
             "h5ad": h5ad,
+            "dataset_config": dataset["_path"],
         },
     )
     ds, n, k = dataset_label, len(df), len(order)
@@ -524,10 +545,13 @@ def run(
     low = list(metrics.index[metrics.recall < 0.5])
     high = list(metrics.index[metrics.f1 >= 0.85])
     zero = list(metrics.index[metrics.correct == 0])
+    abbrev = [
+        f"{s_} = {f_}" for s_, f_ in full_names.items() if s_ in order and s_ != f_
+    ]
     names_note = (
-        "Cell types are shown by their dataset codes because the source annotation stores no names."
+        "Cell types are shown by their dataset codes because no names are configured."
         if not class_names
-        else ""
+        else (f"Abbreviations: {'; '.join(abbrev)}." if abbrev else "")
     )
     sel = f"The checkpoint with the lowest validation loss (epoch {r.status['best_epoch']}) was evaluated."
     base = {"cells": n, "classes": k, "accuracy": acc, "macro_f1": mf1}
@@ -694,22 +718,23 @@ def main(argv=None) -> None:
         help="dir with test_predictions.npz, status.json",
     )
     p.add_argument(
-        "--h5ad",
+        "--dataset",
+        default="zheng",
+        help="dataset config name in configs/datasets/cta/ or a YAML path",
+    )
+    p.add_argument(
+        "--h5ad", type=Path, help="override the test h5ad from the dataset config"
+    )
+    p.add_argument(
+        "--out",
         type=Path,
-        default=DEFAULT_H5AD,
-        help="test h5ad the predictions were made on",
-    )
-    p.add_argument(
-        "--out", type=Path, default=Path("viz_outputs"), help="root output dir"
-    )
-    p.add_argument("--dataset-label", default="Zheng")
-    p.add_argument(
-        "--class-names", type=Path, help="optional JSON {code: name} for display"
+        default=DEFAULT_OUT,
+        help="root output dir; figures go to <out>/cta/<dataset>/",
     )
     args = p.parse_args(argv)
     use_headless_backend()
-    names = json.loads(args.class_names.read_text()) if args.class_names else None
-    w = run(args.run_dir, args.h5ad, args.out, names, args.dataset_label)
+    cfg = load_dataset_config("cta", args.dataset)
+    w = run(args.run_dir, args.out, cfg, args.h5ad)
     print(f"Saved {len(w.records)} figures to {w.root.resolve()}")
 
 

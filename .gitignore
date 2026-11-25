@@ -204,5 +204,3 @@ issues/
 pull_request/
 
 temp/
-# deepsc.viz figure outputs
-viz_outputs/

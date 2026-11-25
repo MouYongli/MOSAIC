@@ -1,0 +1,36 @@
+# Zheng68K PBMC cell type annotation benchmark (train/val/test split on warhol).
+#
+# The h5ad files store cell types only as integer codes in obs["celltype"].
+# Codes are the 11 original Zheng et al. (2017) labels in alphabetical order
+# (label-encoded). Verified on 2026-11-25 against all 65,943 cells of the
+# train/val/test split:
+#   * class sizes match the Zheng68K label counts (e.g. code 8: 20,307 cells);
+#   * marker genes per code (mean log-normalized expression) are listed under
+#     `evidence` below.
+# The original labels were assigned by correlation with purified reference
+# populations and are known to be noisy for T cell subsets (codes 3-6, 8, 9).
+
+name: zheng
+label: Zheng68K
+task: cta
+celltype_col: celltype
+var_name_col: null  # gene symbols are in var_names
+
+data:
+  train: /DATA2/DeepSC/cell_type_annotation/zheng_train.h5ad
+  val: /DATA2/DeepSC/cell_type_annotation/zheng_val.h5ad
+  test: /DATA2/DeepSC/cell_type_annotation/zheng_test.h5ad
+
+# code -> name (original label) and short (used in figures)
+classes:
+  "0":  {name: "CD14+ Monocyte",                short: "CD14+ Mono",       evidence: "LYZ, S100A8, CD14, CST3"}
+  "1":  {name: "CD19+ B",                       short: "B",                evidence: "CD79A, MS4A1, CD19"}
+  "2":  {name: "CD34+",                         short: "CD34+",            evidence: "CD34 (only class expressing it)"}
+  "3":  {name: "CD4+ T Helper2",                short: "CD4+ Th2",         evidence: "CD3D/E, CD4; 92 cells"}
+  "4":  {name: "CD4+/CD25 T Reg",               short: "CD4+ Treg",        evidence: "CD3D/E; highest FOXP3, IL2RA"}
+  "5":  {name: "CD4+/CD45RA+/CD25- Naive T",    short: "CD4+ Naive T",     evidence: "CD4, CCR7, SELL, LEF1; low S100A4"}
+  "6":  {name: "CD4+/CD45RO+ Memory",           short: "CD4+ Memory T",    evidence: "CD3D/E, IL7R, high S100A4"}
+  "7":  {name: "CD56+ NK",                      short: "NK",               evidence: "NKG7, GNLY, GZMB, PRF1; lower CD3"}
+  "8":  {name: "CD8+ Cytotoxic T",              short: "CD8+ Cytotoxic T", evidence: "CD8A/B, NKG7, GZMH"}
+  "9":  {name: "CD8+/CD45RA+ Naive Cytotoxic",  short: "CD8+ Naive T",     evidence: "CD8B, CCR7, SELL, LEF1"}
+  "10": {name: "Dendritic",                     short: "DC",               evidence: "FCER1A, CLEC10A, CST3"}

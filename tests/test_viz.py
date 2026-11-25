@@ -191,3 +191,19 @@ def test_figure_writer_writes_untitled_figure_metadata_and_index(tmp_path):
         "verification"
     ] == {"ok": True}
     assert "## 1. T" in (root / "README.md").read_text()
+
+
+def test_dataset_configs_load_and_zheng_names_every_code():
+    from deepsc.viz._common import load_dataset_config
+
+    zheng = load_dataset_config("cta", "zheng")
+    short, full = cta.class_names_from_config(zheng)
+    assert sorted(short, key=int) == [str(i) for i in range(11)]
+    assert short["0"] == "CD14+ Mono" and full["DC"] == "Dendritic"
+    display, order = cta.class_order(np.array(["0", "1", "10", "2"]), short)
+    assert order == ["CD14+ Mono", "B", "CD34+", "DC"]
+    assert load_dataset_config("pp", "adamson")["data"]["split"].endswith(".pkl")
+    with pytest.raises(ValueError):
+        load_dataset_config("pp", zheng["_path"])
+    with pytest.raises(FileNotFoundError):
+        load_dataset_config("cta", "does_not_exist")
